@@ -99,14 +99,19 @@ def get_or_create_user(member):
             "status": STARTING_STATUS,
             "house": STARTING_HOUSE,
             "partners": [],
-            "strikes": 0
+            "strikes": 0,
+            "allure_boost_multiplier": None,
+            "allure_boost_sessions_left": 0
         })
     else:
         ref.update({"username": member.name})
     return ref.get().to_dict()
 
-def calculate_session_price(body_count: int) -> int:
-    return max(SESSION_PRICE_FLOOR, round(1500 / (1 + body_count * DECAY_RATE)))
+def calculate_session_price(body_count: int, multiplier: float = None) -> int:
+    base_price = max(SESSION_PRICE_FLOOR, round(1500 / (1 + body_count * DECAY_RATE)))
+    if multiplier:
+        base_price = round(base_price * (1 + multiplier))
+    return base_price
 
 def get_setting(key, default):
     ref = db.collection("settings").document(key)
@@ -440,7 +445,10 @@ class SessionConfirmView(View):
         session_id = str(uuid.uuid4())
         sessions[session_id] = {
             "members": {initiator_id, target_id},
-            "channel_id": interaction.channel.id
+            "channel_id": interaction.channel.id,
+            "payer_id": target_id,
+            "payee_id": initiator_id,
+            "price": self.price
         }
         active_sessions[initiator_id] = session_id
         active_sessions[target_id] = session_id
@@ -454,7 +462,19 @@ class SessionConfirmView(View):
 
         db.collection("users").document(str(initiator_id)).update({"balance": initiator_data["balance"] - self.price})
         target_data = db.collection("users").document(str(target_id)).get().to_dict()
-        db.collection("users").document(str(target_id)).update({"balance": target_data["balance"] + self.price})
+
+        new_target_balance = target_data["balance"] + self.price
+        update_data = {"balance": new_target_balance}
+
+        if target_data.get("allure_boost_multiplier"):
+            sessions_left = target_data.get("allure_boost_sessions_left", 0) - 1
+            if sessions_left <= 0:
+                update_data["allure_boost_multiplier"] = None
+                update_data["allure_boost_sessions_left"] = 0
+            else:
+                update_data["allure_boost_sessions_left"] = sessions_left
+
+        db.collection("users").document(str(target_id)).update(update_data)
 
         await log_transaction(f"💋 Session: <@{initiator_id}> paid {self.price} 🪙 to <@{target_id}>", interaction.guild_id)
         await interaction.response.edit_message(content=f"🔥 {self.initiator.name} and {self.target.name} are now in a session! {self.price} 🪙 transferred.", view=None)
@@ -490,7 +510,7 @@ async def csex(interaction: discord.Interaction, user: discord.Member):
         return
 
     target_data = get_or_create_user(user)
-    price = calculate_session_price(target_data["body_count"])
+    price = calculate_session_price(target_data["body_count"], target_data.get("allure_boost_multiplier"))
 
     view = SessionConfirmView(initiator=interaction.user, target=user, price=price)
     await interaction.response.send_message(
@@ -537,12 +557,27 @@ class SessionSellConfirmView(View):
 
         db.collection("users").document(str(target_id)).update({"balance": target_data["balance"] - self.price})
         initiator_data = db.collection("users").document(str(initiator_id)).get().to_dict()
-        db.collection("users").document(str(initiator_id)).update({"balance": initiator_data["balance"] + self.price})
+
+        new_initiator_balance = initiator_data["balance"] + self.price
+        update_data = {"balance": new_initiator_balance}
+
+        if initiator_data.get("allure_boost_multiplier"):
+            sessions_left = initiator_data.get("allure_boost_sessions_left", 0) - 1
+            if sessions_left <= 0:
+                update_data["allure_boost_multiplier"] = None
+                update_data["allure_boost_sessions_left"] = 0
+            else:
+                update_data["allure_boost_sessions_left"] = sessions_left
+
+        db.collection("users").document(str(initiator_id)).update(update_data)
 
         session_id = str(uuid.uuid4())
         sessions[session_id] = {
             "members": {initiator_id, target_id},
-            "channel_id": interaction.channel.id
+            "channel_id": interaction.channel.id,
+            "payer_id": target_id,
+            "payee_id": initiator_id,
+            "price": self.price
         }
         active_sessions[initiator_id] = session_id
         active_sessions[target_id] = session_id
@@ -584,7 +619,7 @@ async def csexsell(interaction: discord.Interaction, user: discord.Member):
         return
 
     initiator_data = get_or_create_user(interaction.user)
-    price = calculate_session_price(initiator_data["body_count"])
+    price = calculate_session_price(initiator_data["body_count"], initiator_data.get("allure_boost_multiplier"))
 
     view = SessionSellConfirmView(initiator=interaction.user, target=user, price=price)
     await interaction.response.send_message(
@@ -640,17 +675,39 @@ async def cinterrupt(interaction: discord.Interaction):
         return
 
     session_id = active_sessions[user_id]
-    sessions[session_id]["members"].remove(user_id)
+    session_data = sessions[session_id]
+    session_data["members"].remove(user_id)
     active_sessions.pop(user_id, None)
 
-    remaining = sessions[session_id]["members"]
+    remaining = session_data["members"]
 
     if len(remaining) < 2:
-        # End session for everyone, no updates
+        # End session for everyone, no updates, refund the payer
         for member_id in remaining:
             active_sessions.pop(member_id, None)
+
+        payer_id = session_data.get("payer_id")
+        payee_id = session_data.get("payee_id")
+        price = session_data.get("price")
+
+        if payer_id and payee_id and price:
+            payer_ref = db.collection("users").document(str(payer_id))
+            payee_ref = db.collection("users").document(str(payee_id))
+            payer_data = payer_ref.get().to_dict()
+            payee_data = payee_ref.get().to_dict()
+
+            print(f"DEBUG: payer_id={payer_id}, payee_id={payee_id}, price={price}")
+            print(f"DEBUG: payer balance before={payer_data['balance']}, payee balance before={payee_data['balance']}")
+
+            payer_ref.update({"balance": payer_data["balance"] + price})
+            payee_ref.update({"balance": payee_data["balance"] - price})
+
+            print(f"DEBUG: refund complete")
+
+            await log_transaction(f"↩️ Refund: <@{payee_id}> refunded {price} 🪙 to <@{payer_id}> (session interrupted)", interaction.guild_id)
+
         sessions.pop(session_id, None)
-        await interaction.response.send_message(f"⛔ {interaction.user.name} left the session. Not enough participants, session ended for everyone. No stats updated.")
+        await interaction.response.send_message(f"⛔ {interaction.user.name} left the session. Not enough participants, session ended for everyone. No stats updated, payment refunded.")
     else:
         await interaction.response.send_message(f"⛔ {interaction.user.name} left the session. Others are still going!")
 
@@ -911,5 +968,89 @@ async def csetreactionrole(interaction: discord.Interaction, message_id: str, em
     add_reaction_role(message_id, emoji, role.id)
 
     await interaction.response.send_message(f"✅ Reaction role set! React with {emoji} on that message to get {role.mention}.", ephemeral=True)
+
+class PerkBuyView(View):
+    def __init__(self, perks: list):
+        super().__init__(timeout=None)
+        for perk in perks:
+            self.add_item(self.make_button(perk))
+
+    def make_button(self, perk):
+        button = Button(label=f"{perk['label']} — {perk['price']} 🪙", style=discord.ButtonStyle.green)
+
+        async def callback(interaction: discord.Interaction):
+            await self.handle_purchase(interaction, perk)
+
+        button.callback = callback
+        return button
+
+    async def handle_purchase(self, interaction: discord.Interaction, perk):
+        user_data = get_or_create_user(interaction.user)
+
+        if user_data["balance"] < perk["price"]:
+            await interaction.response.send_message(f"❌ You don't have enough 🪙! This perk costs {perk['price']} 🪙.", ephemeral=True)
+            return
+
+        ref = db.collection("users").document(str(interaction.user.id))
+
+        if perk["effect"] == "virginity_reset":
+            ref.update({
+                "balance": user_data["balance"] - perk["price"],
+                "status": STARTING_STATUS,
+                "body_count": STARTING_BODY_COUNT,
+                "partners": []
+            })
+
+        elif perk["effect"] == "allure_boost":
+            if user_data.get("allure_boost_multiplier"):
+                await interaction.response.send_message("❌ You already have an active Allure Boost! Wait for it to expire first.", ephemeral=True)
+                return
+
+            ref.update({
+                "balance": user_data["balance"] - perk["price"],
+                "allure_boost_multiplier": perk["multiplier"],
+                "allure_boost_sessions_left": perk["sessions"]
+            })
+
+        await log_transaction(f"🛍️ Perk Purchase: <@{interaction.user.id}> bought **{perk['label']}** for {perk['price']} 🪙", interaction.guild_id)
+        await interaction.response.send_message(f"✅ You bought **{perk['label']}**! Your stats have been updated.", ephemeral=True)
+
+@bot.tree.command(name="cpostperk", description="Post a perk to a channel (Mod/Owner only)")
+@app_commands.describe(perk="Which perk to post", channel="Where to post it")
+@app_commands.choices(perk=[
+    app_commands.Choice(name="Virginity Reset", value="virginity_reset"),
+    app_commands.Choice(name="Allure Boost", value="allure_boost")
+])
+async def cpostperk(interaction: discord.Interaction, perk: app_commands.Choice[str], channel: discord.TextChannel):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if perk.value == "virginity_reset":
+        description = "🌸 **Virginity Perk**\n-# Reclaim your innocence. Resets your status back to virgin, your body count to 0, and clears your partner history."
+        perks = [
+            {"label": "Buy", "price": 10000, "effect": "virginity_reset"}
+        ]
+
+    elif perk.value == "allure_boost":
+        description = (
+            "✨ **Allure Boost**\n"
+            "-# Temporarily increase your session price. Only one Allure Boost can be active at a time.\n\n"
+            "**Tier I** — +10% price for 3 sessions\n"
+            "**Tier II** — +50% price for 5 sessions\n"
+            "**Tier III** — +90% price for 2 sessions"
+        )
+        perks = [
+            {"label": "Tier I", "price": 4000, "effect": "allure_boost", "multiplier": 0.1, "sessions": 3},
+            {"label": "Tier II", "price": 5000, "effect": "allure_boost", "multiplier": 0.5, "sessions": 5},
+            {"label": "Tier III", "price": 6000, "effect": "allure_boost", "multiplier": 0.9, "sessions": 2}
+        ]
+
+    view = PerkBuyView(perks)
+    await channel.send(description, view=view)
+    await interaction.response.send_message(f"✅ Perk posted to {channel.mention}!", ephemeral=True)
 
 bot.run(TOKEN)
