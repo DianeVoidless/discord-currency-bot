@@ -55,9 +55,10 @@ async def on_ready():
         print(f"Synced {len(synced1)} commands to server 1")
         print(f"Synced {len(synced2)} commands to server 2")
     except Exception as e:
-        print(e)
+            print(e)
     print(f"Logged in as {bot.user}")
     bot.loop.create_task(session_check_loop())
+    await announce_status("✅ Currency Bot is now **online**!")
 
 @bot.event
 async def on_raw_reaction_add(payload):
@@ -156,6 +157,17 @@ async def log_strike(message: str, guild_id: int):
         await channel.send(message)
     except Exception as e:
         print(f"Log strike error: {e}")
+
+async def announce_status(message: str):
+    for guild in bot.guilds:
+        channel_id = get_setting(f"announce_channel_id_{guild.id}", None)
+        if not channel_id:
+            continue
+        try:
+            channel = await bot.fetch_channel(channel_id)
+            await channel.send(message)
+        except Exception as e:
+            print(f"Announce error: {e}")
 
 async def end_session_for_user(user_id: int):
     if user_id not in active_sessions:
@@ -860,6 +872,18 @@ async def csetlogchannel(interaction: discord.Interaction, channel: discord.Text
     set_setting(f"log_channel_id_{interaction.guild_id}", channel.id)
     await interaction.response.send_message(f"✅ Transaction log channel set to {channel.mention}!")
 
+@bot.tree.command(name="csetannouncechannel", description="Set the channel for bot status announcements (Mod/Owner only)")
+async def csetannouncechannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    set_setting(f"announce_channel_id_{interaction.guild_id}", channel.id)
+    await interaction.response.send_message(f"✅ Announcement channel set to {channel.mention}!")
+
 class HelpView(View):
     def __init__(self):
         super().__init__(timeout=60)
@@ -1052,5 +1076,16 @@ async def cpostperk(interaction: discord.Interaction, perk: app_commands.Choice[
     view = PerkBuyView(perks)
     await channel.send(description, view=view)
     await interaction.response.send_message(f"✅ Perk posted to {channel.mention}!", ephemeral=True)
+
+async def main():
+    try:
+        await bot.start(TOKEN)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        await announce_status("⛔ Currency Bot is now **offline**!")
+        await bot.close()
+
+asyncio.run(main())
 
 bot.run(TOKEN)
