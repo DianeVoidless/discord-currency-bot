@@ -1,4 +1,8 @@
+import uuid
+import time
 import config
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
@@ -6,10 +10,9 @@ import os
 import firebase_admin
 from firebase_admin import credentials, firestore
 from discord.ext import commands
-import uuid
-import time
 from discord.ui import View, Button
 import asyncio
+
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -60,6 +63,8 @@ async def on_ready():
             print(e)
     print(f"Logged in as {bot.user}")
     bot.loop.create_task(session_check_loop())
+    bot.loop.create_task(leaderboard_loop())
+    bot.loop.create_task(daily_eligibility_loop())
     await announce_status("✅ Currency Bot is now **online**!")
 
 @bot.event
@@ -89,6 +94,20 @@ async def on_raw_reaction_remove(payload):
     role = guild.get_role(role_data["role_id"])
     if member and role:
         await member.remove_roles(role)
+
+@bot.event
+async def on_message(message):
+    if message.author.bot:
+        return
+    if message.guild is None:
+        return
+    if message.channel.id in config.EXCLUDED_ACTIVITY_CHANNELS:
+        return
+
+    increment_activity_count(message.guild.id, message.author.id)
+    mark_message_sent_today(message.author.id)
+
+    await bot.process_commands(message)
 
 def get_or_create_user(member):
     user_id = member.id
@@ -126,6 +145,43 @@ def get_setting(key, default):
 
 def set_setting(key, value):
     db.collection("settings").document(key).set({"value": value})
+    
+def get_current_week_start():
+    now = datetime.now(ZoneInfo("Europe/Bucharest"))
+    days_since_friday = (now.weekday() - 4) % 7  # Monday=0 ... Friday=4, Sunday=6
+    week_start = now - timedelta(days=days_since_friday)
+    week_start = week_start.replace(hour=14, minute=0, second=0, microsecond=0)
+
+    if week_start > now:
+        week_start -= timedelta(days=7)
+
+    return week_start
+
+def increment_activity_count(guild_id: int, user_id: int):
+    current_week = get_current_week_start()
+    doc_id = f"{guild_id}_{user_id}"
+    ref = db.collection("activity").document(doc_id)
+    doc = ref.get()
+
+    if doc.exists:
+        data = doc.to_dict()
+        if data.get("week_start") == current_week.isoformat():
+            count = data.get("count", 0) + 1
+        else:
+            count = 1  # new week, start over
+    else:
+        count = 1
+
+    ref.set({
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "count": count,
+        "week_start": current_week.isoformat()
+    })
+    
+def mark_message_sent_today(user_id: int):
+    today = datetime.now(ZoneInfo("Europe/Bucharest")).date().isoformat()
+    db.collection("users").document(str(user_id)).set({"last_message_date": today}, merge=True)
 
 def add_reaction_role(message_id, emoji, role_id):
     db.collection("reaction_roles").document(f"{message_id}_{emoji}").set({
@@ -338,6 +394,150 @@ async def session_check_loop():
                 )
                 view.message = sent_message
 
+async def post_weekly_leaderboard(guild, week_start):
+    channel_id = get_setting(f"leaderboard_channel_id_{guild.id}", None)
+    print(f"[LEADERBOARD DEBUG] guild={guild.id}, channel_id={channel_id}")
+    if not channel_id:
+        print("[LEADERBOARD DEBUG] No channel_id found, returning early")
+        return
+    channel = bot.get_channel(channel_id)
+    print(f"[LEADERBOARD DEBUG] channel object = {channel}")
+    if not channel:
+        print("[LEADERBOARD DEBUG] bot.get_channel returned None, returning early")
+        return
+
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        query = (
+            db.collection("activity")
+            .where(filter=FieldFilter("guild_id", "==", guild.id))
+            .where(filter=FieldFilter("week_start", "==", week_start.isoformat()))
+            .order_by("count", direction=firestore.Query.DESCENDING)
+            .limit(3)
+        )
+        print(f"[LEADERBOARD DEBUG] Querying with week_start={week_start.isoformat()}")
+        results = list(query.stream())
+        print(f"[LEADERBOARD DEBUG] Got {len(results)} result(s)")
+
+        if not results:
+            print("[LEADERBOARD DEBUG] No results, sending 'no activity' message")
+            await channel.send("📊 **Weekly Leaderboard** — no activity recorded this week!")
+            return
+
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, doc in enumerate(results):
+            data = doc.to_dict()
+            lines.append(f"{medals[i]} <@{data['user_id']}> — {data['count']} messages")
+
+        print("[LEADERBOARD DEBUG] Sending results message")
+        await channel.send("**📊 Weekly Leaderboard Results**\n\n" + "\n".join(lines))
+        print("[LEADERBOARD DEBUG] Message sent successfully")
+    except Exception as e:
+        print(f"[LEADERBOARD ERROR] {type(e).__name__}: {e}")
+
+async def daily_eligibility_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(config.DAILY_ELIGIBILITY_CHECK_INTERVAL)
+        today = datetime.now(ZoneInfo("Europe/Bucharest")).date().isoformat()
+        now = time.time()
+
+        for guild in bot.guilds:
+            channel_id = get_setting(f"daily_channel_id_{guild.id}", None)
+            if not channel_id:
+                continue
+            channel = bot.get_channel(channel_id)
+            if not channel:
+                continue
+
+            for member in guild.members:
+                if member.bot:
+                    continue
+                if member.id in config.EXCLUDED_DAILY_USERS:
+                    continue
+
+                ref = db.collection("users").document(str(member.id))
+                doc = ref.get()
+                if not doc.exists:
+                    continue
+                data = doc.to_dict()
+
+                if data.get("last_message_date") != today:
+                    continue
+
+                last_claim = data.get("last_daily_claim")
+                if last_claim is not None and (now - last_claim) < config.DAILY_CLAIM_COOLDOWN:
+                    continue
+
+                if data.get("daily_reminder_sent"):
+                    continue
+
+                view = DailyClaimView(member.id)
+                await channel.send(
+                    f"🪙 {member.mention}, your daily reward is ready! Click below to claim it.",
+                    view=view
+                )
+                ref.update({"daily_reminder_sent": True})
+
+class DailyClaimView(View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)  # stays clickable until claimed, no expiry
+        self.user_id = user_id
+
+    @discord.ui.button(label="Claim Daily Reward", style=discord.ButtonStyle.green, emoji="🪙")
+    async def claim(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This isn't your claim!", ephemeral=True)
+            return
+
+        user_data = get_or_create_user(interaction.user)
+        now = time.time()
+        last_claim = user_data.get("last_daily_claim")
+        current_streak = user_data.get("daily_streak", 0)
+
+        if last_claim is not None and (now - last_claim) < config.DAILY_CLAIM_COOLDOWN:
+            await interaction.response.send_message("❌ You've already claimed your daily reward recently!", ephemeral=True)
+            return
+
+        if last_claim is not None and (now - last_claim) <= config.DAILY_STREAK_GRACE:
+            new_streak = current_streak + 1
+        else:
+            new_streak = 1
+
+        capped_streak = min(new_streak, config.DAILY_STREAK_CAP)
+        reward = config.DAILY_REWARD_BASE + (capped_streak - 1) * config.DAILY_STREAK_BONUS_PER_DAY
+
+        ref = db.collection("users").document(str(interaction.user.id))
+        ref.update({
+            "balance": user_data["balance"] + reward,
+            "last_daily_claim": now,
+            "daily_streak": new_streak,
+            "daily_reminder_sent": False
+        })
+
+        button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        streak_text = f"{new_streak} day" if new_streak == 1 else f"{new_streak} days"
+        await interaction.followup.send(
+            f"✅ You claimed **{reward} 🪙**! (Streak: {streak_text})",
+            ephemeral=True
+        )
+
+async def leaderboard_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        now = datetime.now(ZoneInfo("Europe/Bucharest"))
+        current_week = get_current_week_start()
+        next_week = current_week + timedelta(days=7)
+        seconds_until_next = (next_week - now).total_seconds()
+
+        print(f"Leaderboard loop sleeping {int(seconds_until_next)}s until next Saturday midnight (Bucharest)")
+        await asyncio.sleep(seconds_until_next)
+
+        for guild in bot.guilds:
+            await post_weekly_leaderboard(guild, current_week)
 
 @bot.tree.command(name="cprofile", description="View your profile")
 async def profile(interaction: discord.Interaction):
@@ -367,6 +567,41 @@ async def cview(interaction: discord.Interaction, user: discord.Member):
         f"🏠 House: {profile['house'] or 'None'}"
     )
 
+@bot.tree.command(name="cleaderboard", description="Show the top 3 most active users this week")
+async def cleaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        current_week = get_current_week_start()
+
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        query = (
+            db.collection("activity")
+            .where(filter=FieldFilter("guild_id", "==", interaction.guild_id))
+            .where(filter=FieldFilter("week_start", "==", current_week.isoformat()))
+            .order_by("count", direction=firestore.Query.DESCENDING)
+            .limit(3)
+        )
+        results = list(query.stream())
+
+        if not results:
+            await interaction.followup.send("No activity recorded yet this week!")
+            return
+
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, doc in enumerate(results):
+            data = doc.to_dict()
+            user_id = data["user_id"]
+            count = data["count"]
+            lines.append(f"{medals[i]} <@{user_id}> — {count} messages")
+
+        await interaction.followup.send(
+            "**📊 This Week's Most Active Users**\n\n" + "\n".join(lines)
+        )
+    except Exception as e:
+        print(f"[LEADERBOARD ERROR] {type(e).__name__}: {e}")
+        await interaction.followup.send(f"❌ Something went wrong: {e}")
 
 class TransactionConfirmView(View):
     def __init__(self, sender_id: int, receiver_id: int, amount: int):
@@ -962,6 +1197,92 @@ async def csetannouncechannel(interaction: discord.Interaction, channel: discord
     set_setting(f"announce_channel_id_{interaction.guild_id}", channel.id)
     await interaction.response.send_message(f"✅ Announcement channel set to {channel.mention}!")
 
+@bot.tree.command(name="csetleaderboardchannel", description="Set the channel for the automatic weekly leaderboard (Mod/Owner only)")
+async def csetleaderboardchannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    set_setting(f"leaderboard_channel_id_{interaction.guild_id}", channel.id)
+    await interaction.response.send_message(f"✅ Leaderboard channel set to {channel.mention}!")
+
+@bot.tree.command(name="csetdailychannel", description="Set the channel for daily reward claim pings (Mod/Owner only)")
+async def csetdailychannel(interaction: discord.Interaction, channel: discord.TextChannel):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    set_setting(f"daily_channel_id_{interaction.guild_id}", channel.id)
+    await interaction.response.send_message(f"✅ Daily reward channel set to {channel.mention}!")
+
+@bot.tree.command(name="ctestdailyping", description="TEMP: manually trigger a daily reward ping for yourself (Mod/Owner only)")
+async def ctestdailyping(interaction: discord.Interaction):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    channel_id = get_setting(f"daily_channel_id_{interaction.guild_id}", None)
+    if not channel_id:
+        await interaction.response.send_message("❌ No daily channel set! Use /csetdailychannel first.", ephemeral=True)
+        return
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        await interaction.response.send_message("❌ Couldn't find that channel!", ephemeral=True)
+        return
+
+    get_or_create_user(interaction.user)
+    mark_message_sent_today(interaction.user.id)
+    db.collection("users").document(str(interaction.user.id)).update({"daily_reminder_sent": False})
+
+    view = DailyClaimView(interaction.user.id)
+    await channel.send(
+        f"🪙 {interaction.user.mention}, your daily reward is ready! Click below to claim it.",
+        view=view
+    )
+    await interaction.response.send_message("✅ Test ping sent!", ephemeral=True)
+
+
+
+
+
+
+
+
+
+@bot.tree.command(name="ctestleaderboardpost", description="TEMP: manually trigger the weekly leaderboard post (Mod/Owner only)")
+async def ctestleaderboardpost(interaction: discord.Interaction):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    await interaction.response.send_message("✅ Triggering test post...", ephemeral=True)
+    current_week = get_current_week_start()
+    await post_weekly_leaderboard(interaction.guild, current_week)
+
+
+
+
+
+
+
+
+
+
+
+
+
 class HelpView(View):
     def __init__(self):
         super().__init__(timeout=60)
@@ -985,11 +1306,22 @@ class HelpView(View):
                 "🔸`/crequest @user [amount]`\n-# Request 🪙 from someone"
             ),
             (
+                "📖 Activity & Rewards",
+                "🔸`/cleaderboard`\n-# Show the top 3 most active users this week\n"
+                "-# A new leaderboard is also posted automatically every Friday at 2 PM (Romania time)\n\n"
+                "**Daily Reward**\n"
+                "-# Send at least one message each day to become eligible. Once eligible, the bot will ping you in the daily reward channel with a claim button.\n"
+                "-# Claiming builds a streak — the longer your streak, the bigger the reward (up to a cap)."
+            ),
+            (
                 "📖 Mod/Owner Only",
                 "🔸`/cedit @user [field] [value]`\n-# Edit a user's profile\n"
                 "🔸`/creset @user`\n-# Reset a user's stats\n"
                 "🔸`/cendall`\n-# Force close all active sessions\n"
                 "🔸`/csetlogchannel #channel`\n-# Set the transaction log channel\n"
+                "🔸`/csetannouncechannel #channel`\n-# Set the bot status announcement channel\n"
+                "🔸`/csetleaderboardchannel #channel`\n-# Set the channel for the automatic weekly leaderboard\n"
+                "🔸`/csetdailychannel #channel`\n-# Set the channel for daily reward claim pings\n"
                 "🔸`/cstrike @user [reason]`\n-# Add a strike to a user\n"
                 "🔸`/cunstrike @user [reason]`\n-# Remove a strike from a user\n"
                 "🔸`/cmodview @user`\n-# View a user's full profile including strikes\n"
