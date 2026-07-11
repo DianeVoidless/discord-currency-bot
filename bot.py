@@ -1,3 +1,4 @@
+import config
 import discord
 from discord import app_commands
 from dotenv import load_dotenv
@@ -6,6 +7,7 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 from discord.ext import commands
 import uuid
+import time
 from discord.ui import View, Button
 import asyncio
 
@@ -197,10 +199,54 @@ async def end_session_for_user(user_id: int):
 
     sessions.pop(session_id, None)
 
+async def end_session_for_afk_user(user_id: int):
+    if user_id not in active_sessions:
+        return
+
+    session_id = active_sessions[user_id]
+    session_data = sessions.get(session_id)
+    if not session_data:
+        active_sessions.pop(user_id, None)
+        return
+
+    session_members = session_data["members"]
+
+    # Update stats for the AFK user leaving, same as a normal /cend
+    ref = db.collection("users").document(str(user_id))
+    user_data = ref.get().to_dict()
+    partners = user_data.get("partners", [])
+
+    new_partners = [str(m) for m in session_members if m != user_id and str(m) not in partners]
+    new_body_count = user_data["body_count"] + len(new_partners)
+    updated_partners = partners + new_partners
+
+    update_data = {"partners": updated_partners}
+    if new_body_count > user_data["body_count"]:
+        update_data["body_count"] = new_body_count
+    if user_data["status"] == "virgin" and new_body_count > 0:
+        update_data["status"] = "non-virgin"
+
+    ref.update(update_data)
+
+    # Remove just this one user from the session
+    session_members.discard(user_id)
+    active_sessions.pop(user_id, None)
+    session_data.get("awaiting_confirmation", set()).discard(user_id)
+
+    if len(session_members) < 2:
+        # Not enough people left to continue, end it for whoever remains
+        for member_id in session_members.copy():
+            active_sessions.pop(member_id, None)
+        sessions.pop(session_id, None)
+        pending_checks.discard(session_id)
+    elif not session_data.get("awaiting_confirmation"):
+        # Session survives, and everyone else already confirmed — round is over
+        pending_checks.discard(session_id)
+        session_data["last_active"] = time.time()
 
 class SessionCheckView(View):
     def __init__(self, user_id: int, session_id: str):
-        super().__init__(timeout=60)
+        super().__init__(timeout=config.SESSION_CHECK_TIMEOUT)
         self.user_id = user_id
         self.session_id = session_id
 
@@ -210,7 +256,16 @@ class SessionCheckView(View):
             await interaction.response.send_message("This isn't for you!", ephemeral=True)
             return
         self.stop()
-        pending_checks.discard(self.session_id)
+
+        session_data = sessions.get(self.session_id)
+        if session_data:
+            session_data.get("awaiting_confirmation", set()).discard(self.user_id)
+
+            if not session_data.get("awaiting_confirmation"):
+                # everyone has confirmed, restart the timer
+                pending_checks.discard(self.session_id)
+                session_data["last_active"] = time.time()
+
         await interaction.response.edit_message(content=f"✅ {interaction.user.name} confirmed they're still active!", view=None)
 
     @discord.ui.button(label="No, end session", style=discord.ButtonStyle.red)
@@ -224,8 +279,7 @@ class SessionCheckView(View):
         await interaction.response.edit_message(content=f"✅ Session ended for {interaction.user.name}!", view=None)
 
     async def on_timeout(self):
-        pending_checks.discard(self.session_id)
-        await end_session_for_user(self.user_id)
+        await end_session_for_afk_user(self.user_id)
 
 
 async def session_check_loop():
@@ -233,17 +287,29 @@ async def session_check_loop():
     while not bot.is_closed():
         interval = get_setting("session_check_interval", 1800)
         await asyncio.sleep(interval)
-        print(f"Running session check... {len(sessions)} active sessions")
+        now = time.time()
+
         for session_id, session_data in list(sessions.items()):
             if session_id in pending_checks:
                 continue
+
+            last_active = session_data.get("last_active", now)
+            if now - last_active < interval:
+                continue  # not due yet
+
             pending_checks.add(session_id)
             members = session_data["members"].copy()
+            session_data["awaiting_confirmation"] = set(members)
             channel = bot.get_channel(session_data["channel_id"])
             if not channel:
                 continue
 
+            print(f"Session {session_id} due for check (inactive {int(now - last_active)}s)")
+
             for member_id in members:
+                if session_id not in sessions:
+                    break  # session ended mid-round, stop sending stale checks
+
                 member = channel.guild.get_member(member_id)
                 if not member:
                     continue
@@ -290,6 +356,7 @@ class TransactionConfirmView(View):
         self.sender_id = sender_id
         self.receiver_id = receiver_id
         self.amount = amount
+        self.message = None
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.green)
     async def accept(self, interaction: discord.Interaction, button: Button):
@@ -329,6 +396,8 @@ class TransactionConfirmView(View):
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
+        if self.message:
+            await self.message.edit(content="⏰ This transaction request has expired.", view=self)
 
 
 @bot.tree.command(name="csend", description="Send 🪙 to another user")
@@ -357,6 +426,7 @@ class RequestConfirmView(View):
         self.requester_id = requester_id
         self.target_id = target_id
         self.amount = amount
+        self.message = None
 
     @discord.ui.button(label="Accept", style=discord.ButtonStyle.green)
     async def accept(self, interaction: discord.Interaction, button: Button):
@@ -396,6 +466,8 @@ class RequestConfirmView(View):
     async def on_timeout(self):
         for child in self.children:
             child.disabled = True
+        if self.message:
+            await self.message.edit(content="⏰ This request has expired.", view=self)
 
 
 @bot.tree.command(name="crequest", description="Request 🪙 from another user")
@@ -460,7 +532,8 @@ class SessionConfirmView(View):
             "channel_id": interaction.channel.id,
             "payer_id": target_id,
             "payee_id": initiator_id,
-            "price": self.price
+            "price": self.price,
+            "last_active": time.time()
         }
         active_sessions[initiator_id] = session_id
         active_sessions[target_id] = session_id
@@ -589,7 +662,8 @@ class SessionSellConfirmView(View):
             "channel_id": interaction.channel.id,
             "payer_id": target_id,
             "payee_id": initiator_id,
-            "price": self.price
+            "price": self.price,
+            "last_active": time.time()
         }
         active_sessions[initiator_id] = session_id
         active_sessions[target_id] = session_id
@@ -857,7 +931,7 @@ async def csetcheckinterval(interaction: discord.Interaction, seconds: int):
         return
 
     set_setting("session_check_interval", seconds)
-    await interaction.response.send_message(f"✅ Session check interval set to {seconds/60} minutes!")
+    await interaction.response.send_message(f"✅ Session check interval set to {seconds} seconds!")
 
 
 @bot.tree.command(name="csetlogchannel", description="Set the channel for transaction logs (Mod/Owner only)")
