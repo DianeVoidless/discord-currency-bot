@@ -104,6 +104,7 @@ async def on_message(message):
     if message.channel.id in config.EXCLUDED_ACTIVITY_CHANNELS:
         return
 
+    get_or_create_user(message.author)
     increment_activity_count(message.guild.id, message.author.id)
     mark_message_sent_today(message.author.id)
 
@@ -179,6 +180,92 @@ def increment_activity_count(guild_id: int, user_id: int):
         "week_start": current_week.isoformat()
     })
     
+def increment_session_count(guild_id: int, user_id: int):
+    current_week = get_current_week_start()
+    doc_id = f"{guild_id}_{user_id}"
+    ref = db.collection("session_activity").document(doc_id)
+    doc = ref.get()
+
+    if doc.exists:
+        data = doc.to_dict()
+        if data.get("week_start") == current_week.isoformat():
+            count = data.get("count", 0) + 1
+        else:
+            count = 1  # new week, start over
+    else:
+        count = 1
+
+    ref.set({
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "count": count,
+        "week_start": current_week.isoformat()
+    })
+    
+def increment_coins_received(guild_id: int, user_id: int, amount: int):
+    current_week = get_current_week_start()
+    doc_id = f"{guild_id}_{user_id}"
+    ref = db.collection("coins_received").document(doc_id)
+    doc = ref.get()
+
+    if doc.exists:
+        data = doc.to_dict()
+        if data.get("week_start") == current_week.isoformat():
+            total = data.get("total", 0) + amount
+        else:
+            total = amount  # new week, start over
+    else:
+        total = amount
+
+    ref.set({
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "total": total,
+        "week_start": current_week.isoformat()
+    })
+    
+async def pay_leaderboard_winners(guild_id, results, rewards):
+    print(f"[PAYOUT DEBUG] Called with guild_id={guild_id}, {len(results)} result(s), rewards={rewards}")
+    lines = []
+    medals = ["🥇", "🥈", "🥉"]
+    for i, doc in enumerate(results):
+        if i >= len(rewards):
+            break
+        data = doc.to_dict()
+        user_id = data["user_id"]
+        reward = rewards[i]
+
+        ref = db.collection("users").document(str(user_id))
+        user_doc = ref.get()
+        print(f"[PAYOUT DEBUG] rank {i}: user_id={user_id}, exists={user_doc.exists}")
+        if not user_doc.exists:
+            continue
+        user_data = user_doc.to_dict()
+        current_balance = user_data.get("balance", STARTING_BALANCE)
+
+        ref.set({"balance": current_balance + reward}, merge=True)
+        lines.append(f"{medals[i]} <@{user_id}> received **{reward} 🪙**!")
+
+    print(f"[PAYOUT DEBUG] lines built: {lines}")
+
+    if not lines:
+        print("[PAYOUT DEBUG] No lines, returning early")
+        return
+
+    log_channel_id = get_setting(f"log_channel_id_{guild_id}", None)
+    print(f"[PAYOUT DEBUG] log_channel_id={log_channel_id}")
+    if not log_channel_id:
+        print("[PAYOUT DEBUG] No log_channel_id, returning early")
+        return
+    log_channel = bot.get_channel(log_channel_id)
+    print(f"[PAYOUT DEBUG] log_channel object={log_channel}")
+    if not log_channel:
+        print("[PAYOUT DEBUG] log_channel not found, returning early")
+        return
+
+    await log_channel.send("--**💰 Weekly Winner Rewards**--\n\n" + "\n".join(lines))
+    print("[PAYOUT DEBUG] Sent successfully")
+    
 def mark_message_sent_today(user_id: int):
     today = datetime.now(ZoneInfo("Europe/Bucharest")).date().isoformat()
     db.collection("users").document(str(user_id)).set({"last_message_date": today}, merge=True)
@@ -233,6 +320,7 @@ async def end_session_for_user(user_id: int):
 
     session_id = active_sessions[user_id]
     session_members = sessions[session_id]["members"].copy()
+    guild_id = sessions[session_id].get("guild_id")
 
     for member_id in session_members:
         ref = db.collection("users").document(str(member_id))
@@ -253,6 +341,9 @@ async def end_session_for_user(user_id: int):
         ref.update(update_data)
         active_sessions.pop(member_id, None)
 
+        if guild_id:
+            increment_session_count(guild_id, member_id)
+
     sessions.pop(session_id, None)
 
 async def end_session_for_afk_user(user_id: int):
@@ -266,6 +357,7 @@ async def end_session_for_afk_user(user_id: int):
         return
 
     session_members = session_data["members"]
+    guild_id = session_data.get("guild_id")
 
     # Update stats for the AFK user leaving, same as a normal /cend
     ref = db.collection("users").document(str(user_id))
@@ -283,6 +375,9 @@ async def end_session_for_afk_user(user_id: int):
         update_data["status"] = "non-virgin"
 
     ref.update(update_data)
+
+    if guild_id:
+        increment_session_count(guild_id, user_id)
 
     # Remove just this one user from the session
     session_members.discard(user_id)
@@ -431,10 +526,82 @@ async def post_weekly_leaderboard(guild, week_start):
             lines.append(f"{medals[i]} <@{data['user_id']}> — {data['count']} messages")
 
         print("[LEADERBOARD DEBUG] Sending results message")
-        await channel.send("**📊 Weekly Leaderboard Results**\n\n" + "\n".join(lines))
+        await channel.send("**# 📊 Weekly Leaderboard Results**\n\n" + "\n".join(lines))
         print("[LEADERBOARD DEBUG] Message sent successfully")
+
+        await pay_leaderboard_winners(guild.id, results, config.ACTIVITY_LEADERBOARD_REWARDS)
     except Exception as e:
         print(f"[LEADERBOARD ERROR] {type(e).__name__}: {e}")
+
+async def post_weekly_received_leaderboard(guild, week_start):
+    channel_id = get_setting(f"leaderboard_channel_id_{guild.id}", None)
+    if not channel_id:
+        return
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        query = (
+            db.collection("coins_received")
+            .where(filter=FieldFilter("guild_id", "==", guild.id))
+            .where(filter=FieldFilter("week_start", "==", week_start.isoformat()))
+            .order_by("total", direction=firestore.Query.DESCENDING)
+            .limit(3)
+        )
+        results = list(query.stream())
+
+        if not results:
+            await channel.send("🪙 **Weekly Top Earners** — no coins received this week!")
+            return
+
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, doc in enumerate(results):
+            data = doc.to_dict()
+            lines.append(f"{medals[i]} <@{data['user_id']}> — {data['total']} 🪙")
+
+        await channel.send("**# 🪙 Weekly Top Earners**\n\n" + "\n".join(lines))
+
+        await pay_leaderboard_winners(guild.id, results, config.RECEIVED_LEADERBOARD_REWARDS)
+    except Exception as e:
+        print(f"[RECEIVED LEADERBOARD ERROR] {type(e).__name__}: {e}")
+
+async def post_weekly_session_leaderboard(guild, week_start):
+    channel_id = get_setting(f"leaderboard_channel_id_{guild.id}", None)
+    if not channel_id:
+        return
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+
+    try:
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        query = (
+            db.collection("session_activity")
+            .where(filter=FieldFilter("guild_id", "==", guild.id))
+            .where(filter=FieldFilter("week_start", "==", week_start.isoformat()))
+            .order_by("count", direction=firestore.Query.DESCENDING)
+            .limit(3)
+        )
+        results = list(query.stream())
+
+        if not results:
+            await channel.send("🔥 **Weekly Session Leaderboard** — no completed sessions this week!")
+            return
+
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, doc in enumerate(results):
+            data = doc.to_dict()
+            lines.append(f"{medals[i]} <@{data['user_id']}> — {data['count']} session(s)")
+
+        await channel.send("**# 🔥 Weekly Session Leaderboard Results**\n\n" + "\n".join(lines))
+
+        await pay_leaderboard_winners(guild.id, results, config.SESSION_LEADERBOARD_REWARDS)
+    except Exception as e:
+        print(f"[SESSION LEADERBOARD ERROR] {type(e).__name__}: {e}")
 
 async def daily_eligibility_loop():
     await bot.wait_until_ready()
@@ -515,6 +682,7 @@ class DailyClaimView(View):
             "daily_streak": new_streak,
             "daily_reminder_sent": False
         })
+        increment_coins_received(interaction.guild_id, interaction.user.id, reward)
 
         button.disabled = True
         await interaction.response.edit_message(view=self)
@@ -538,6 +706,8 @@ async def leaderboard_loop():
 
         for guild in bot.guilds:
             await post_weekly_leaderboard(guild, current_week)
+            await post_weekly_session_leaderboard(guild, current_week)
+            await post_weekly_received_leaderboard(guild, current_week)
 
 @bot.tree.command(name="cprofile", description="View your profile")
 async def profile(interaction: discord.Interaction):
@@ -603,6 +773,78 @@ async def cleaderboard(interaction: discord.Interaction):
         print(f"[LEADERBOARD ERROR] {type(e).__name__}: {e}")
         await interaction.followup.send(f"❌ Something went wrong: {e}")
 
+@bot.tree.command(name="csessionleaderboard", description="Show the top 3 users with the most completed sessions this week")
+async def csessionleaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        current_week = get_current_week_start()
+
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        query = (
+            db.collection("session_activity")
+            .where(filter=FieldFilter("guild_id", "==", interaction.guild_id))
+            .where(filter=FieldFilter("week_start", "==", current_week.isoformat()))
+            .order_by("count", direction=firestore.Query.DESCENDING)
+            .limit(3)
+        )
+        results = list(query.stream())
+
+        if not results:
+            await interaction.followup.send("No completed sessions recorded yet this week!")
+            return
+
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, doc in enumerate(results):
+            data = doc.to_dict()
+            user_id = data["user_id"]
+            count = data["count"]
+            lines.append(f"{medals[i]} <@{user_id}> — {count} session(s)")
+
+        await interaction.followup.send(
+            "**🔥 This Week's Most Active Session Users**\n\n" + "\n".join(lines)
+        )
+    except Exception as e:
+        print(f"[SESSION LEADERBOARD ERROR] {type(e).__name__}: {e}")
+        await interaction.followup.send(f"❌ Something went wrong: {e}")
+
+@bot.tree.command(name="creceivedleaderboard", description="Show the top 3 users who received the most coins this week")
+async def creceivedleaderboard(interaction: discord.Interaction):
+    await interaction.response.defer()
+
+    try:
+        current_week = get_current_week_start()
+
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        query = (
+            db.collection("coins_received")
+            .where(filter=FieldFilter("guild_id", "==", interaction.guild_id))
+            .where(filter=FieldFilter("week_start", "==", current_week.isoformat()))
+            .order_by("total", direction=firestore.Query.DESCENDING)
+            .limit(3)
+        )
+        results = list(query.stream())
+
+        if not results:
+            await interaction.followup.send("No coins received yet this week!")
+            return
+
+        lines = []
+        medals = ["🥇", "🥈", "🥉"]
+        for i, doc in enumerate(results):
+            data = doc.to_dict()
+            user_id = data["user_id"]
+            total = data["total"]
+            lines.append(f"{medals[i]} <@{user_id}> — {total} 🪙")
+
+        await interaction.followup.send(
+            "**🪙 This Week's Top Earners**\n\n" + "\n".join(lines)
+        )
+    except Exception as e:
+        print(f"[RECEIVED LEADERBOARD ERROR] {type(e).__name__}: {e}")
+        await interaction.followup.send(f"❌ Something went wrong: {e}")
+
 class TransactionConfirmView(View):
     def __init__(self, sender_id: int, receiver_id: int, amount: int):
         super().__init__(timeout=config.CONFIRMATION_TIMEOUT)
@@ -632,6 +874,7 @@ class TransactionConfirmView(View):
         sender_ref.update({"balance": sender_data["balance"] - self.amount})
         receiver_data = receiver_ref.get().to_dict()
         receiver_ref.update({"balance": receiver_data["balance"] + self.amount})
+        increment_coins_received(interaction.guild_id, self.receiver_id, self.amount)
 
         await log_transaction(f"💸 Transaction: <@{self.sender_id}> sent {self.amount} 🪙 to <@{self.receiver_id}>", interaction.guild_id)
         await interaction.response.edit_message(content=f"✅ Transaction complete! {self.amount} 🪙 transferred.", view=None)
@@ -701,6 +944,7 @@ class RequestConfirmView(View):
         target_ref.update({"balance": target_data["balance"] - self.amount})
         requester_data = requester_ref.get().to_dict()
         requester_ref.update({"balance": requester_data["balance"] + self.amount})
+        increment_coins_received(interaction.guild_id, self.requester_id, self.amount)
 
         await log_transaction(f"💰 Request: <@{self.target_id}> sent {self.amount} 🪙 to <@{self.requester_id}>", interaction.guild_id)
         await interaction.response.edit_message(content=f"✅ Request accepted! {self.amount} 🪙 transferred.", view=None)
@@ -782,6 +1026,7 @@ class SessionConfirmView(View):
         sessions[session_id] = {
             "members": {initiator_id, target_id},
             "channel_id": interaction.channel.id,
+            "guild_id": interaction.guild_id,
             "payer_id": target_id,
             "payee_id": initiator_id,
             "price": self.price,
@@ -812,10 +1057,11 @@ class SessionConfirmView(View):
                 update_data["allure_boost_sessions_left"] = sessions_left
 
         db.collection("users").document(str(target_id)).update(update_data)
+        increment_coins_received(interaction.guild_id, target_id, self.price)
 
         await log_transaction(f"💋 Session: <@{initiator_id}> paid {self.price} 🪙 to <@{target_id}>", interaction.guild_id)
         await interaction.response.edit_message(content=f"🔥 {self.initiator.name} and {self.target.name} are now in a session! {self.price} 🪙 transferred.", view=None)
-
+    
     @discord.ui.button(label="Decline", style=discord.ButtonStyle.red)
     async def decline(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.target.id:
@@ -907,11 +1153,13 @@ class SessionSellConfirmView(View):
                 update_data["allure_boost_sessions_left"] = sessions_left
 
         db.collection("users").document(str(initiator_id)).update(update_data)
+        increment_coins_received(interaction.guild_id, initiator_id, self.price)
 
         session_id = str(uuid.uuid4())
         sessions[session_id] = {
             "members": {initiator_id, target_id},
             "channel_id": interaction.channel.id,
+            "guild_id": interaction.guild_id,
             "payer_id": target_id,
             "payee_id": initiator_id,
             "price": self.price,
@@ -978,6 +1226,7 @@ async def cend(interaction: discord.Interaction):
 
     session_id = active_sessions[user_id]
     session_members = sessions[session_id]["members"].copy()
+    guild_id = sessions[session_id].get("guild_id")
 
     # Update everyone in the session
     for member_id in session_members:
@@ -998,6 +1247,9 @@ async def cend(interaction: discord.Interaction):
             
         ref.update(update_data)
         active_sessions.pop(member_id, None)
+
+        if guild_id:
+            increment_session_count(guild_id, member_id)
 
     sessions.pop(session_id, None)
 
@@ -1221,6 +1473,34 @@ async def csetdailychannel(interaction: discord.Interaction, channel: discord.Te
     set_setting(f"daily_channel_id_{interaction.guild_id}", channel.id)
     await interaction.response.send_message(f"✅ Daily reward channel set to {channel.mention}!")
 
+@bot.tree.command(name="ctriggerdaily", description="Manually trigger a daily reward ping for a specific user (Mod/Owner only)")
+async def ctriggerdaily(interaction: discord.Interaction, user: discord.Member):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    channel_id = get_setting(f"daily_channel_id_{interaction.guild_id}", None)
+    if not channel_id:
+        await interaction.response.send_message("❌ No daily channel set! Use /csetdailychannel first.", ephemeral=True)
+        return
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        await interaction.response.send_message("❌ Couldn't find that channel!", ephemeral=True)
+        return
+
+    get_or_create_user(user)
+    db.collection("users").document(str(user.id)).update({"daily_reminder_sent": False})
+
+    view = DailyClaimView(user.id)
+    await channel.send(
+        f"🪙 {user.mention}, your daily reward is ready! Click below to claim it.",
+        view=view
+    )
+    await interaction.response.send_message(f"✅ Daily reward ping sent for {user.mention}!", ephemeral=True)
+
 @bot.tree.command(name="ctestdailyping", description="TEMP: manually trigger a daily reward ping for yourself (Mod/Owner only)")
 async def ctestdailyping(interaction: discord.Interaction):
     allowed_roles = ["Mod", "Owner"]
@@ -1258,7 +1538,7 @@ async def ctestdailyping(interaction: discord.Interaction):
 
 
 
-@bot.tree.command(name="ctestleaderboardpost", description="TEMP: manually trigger the weekly leaderboard post (Mod/Owner only)")
+@bot.tree.command(name="ctestleaderboardpost", description="TEMP: manually trigger all weekly leaderboard posts + payouts (Mod/Owner only)")
 async def ctestleaderboardpost(interaction: discord.Interaction):
     allowed_roles = ["Mod", "Owner"]
     user_roles = [role.name for role in interaction.user.roles]
@@ -1270,6 +1550,8 @@ async def ctestleaderboardpost(interaction: discord.Interaction):
     await interaction.response.send_message("✅ Triggering test post...", ephemeral=True)
     current_week = get_current_week_start()
     await post_weekly_leaderboard(interaction.guild, current_week)
+    await post_weekly_session_leaderboard(interaction.guild, current_week)
+    await post_weekly_received_leaderboard(interaction.guild, current_week)
 
 
 
@@ -1281,7 +1563,39 @@ async def ctestleaderboardpost(interaction: discord.Interaction):
 
 
 
+@bot.tree.command(name="cfixprofiles", description="Backfill any missing fields on incomplete user profiles (Mod/Owner only)")
+async def cfixprofiles(interaction: discord.Interaction):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
 
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)
+
+    defaults = {
+        "balance": STARTING_BALANCE,
+        "body_count": STARTING_BODY_COUNT,
+        "status": STARTING_STATUS,
+        "house": STARTING_HOUSE,
+        "partners": [],
+        "strikes": 0,
+        "allure_boost_multiplier": None,
+        "allure_boost_sessions_left": 0
+    }
+
+    docs = db.collection("users").stream()
+    fixed_count = 0
+
+    for doc in docs:
+        data = doc.to_dict()
+        missing = {key: value for key, value in defaults.items() if key not in data}
+        if missing:
+            doc.reference.set(missing, merge=True)
+            fixed_count += 1
+
+    await interaction.followup.send(f"✅ Checked all profiles. Fixed **{fixed_count}** incomplete profile(s).", ephemeral=True)
 
 class HelpView(View):
     def __init__(self):
