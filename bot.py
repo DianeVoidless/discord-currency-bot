@@ -246,9 +246,10 @@ async def end_session_for_afk_user(user_id: int):
 
 class SessionCheckView(View):
     def __init__(self, user_id: int, session_id: str):
-        super().__init__(timeout=config.SESSION_CHECK_TIMEOUT)
+        super().__init__(timeout=config.CONFIRMATION_TIMEOUT)
         self.user_id = user_id
         self.session_id = session_id
+        self.message = None
 
     @discord.ui.button(label="Yes, still active!", style=discord.ButtonStyle.green)
     async def still_active(self, interaction: discord.Interaction, button: Button):
@@ -276,16 +277,32 @@ class SessionCheckView(View):
         self.stop()
         pending_checks.discard(self.session_id)
         await end_session_for_user(self.user_id)
-        await interaction.response.edit_message(content=f"✅ Session ended for {interaction.user.name}!", view=None)
+        await interaction.response.edit_message(content=f"⚠️ Session ended for {interaction.user.name}!", view=None)
 
     async def on_timeout(self):
+        session_data = sessions.get(self.session_id)
+        channel_id = session_data["channel_id"] if session_data else None
+        other_members = (session_data["members"] - {self.user_id}) if session_data else set()
+
         await end_session_for_afk_user(self.user_id)
+
+        for child in self.children:
+            child.disabled = True
+        if self.message:
+            await self.message.edit(content="⏰ You didn't respond in time — you've been removed from the session.", view=self)
+
+        session_ended = self.session_id not in sessions
+        if session_ended and channel_id and other_members:
+            channel = bot.get_channel(channel_id)
+            if channel:
+                mentions = ", ".join(f"<@{m}>" for m in other_members)
+                await channel.send(f"⛔ Session ended — <@{self.user_id}> didn't respond to the AFK check in time. {mentions}, your session has ended too.")
 
 
 async def session_check_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
-        interval = get_setting("session_check_interval", 1800)
+        interval = config.SESSION_CHECK_INTERVAL
         await asyncio.sleep(interval)
         now = time.time()
 
@@ -315,10 +332,11 @@ async def session_check_loop():
                     continue
 
                 view = SessionCheckView(member_id, session_id)
-                await channel.send(
+                sent_message = await channel.send(
                     f"⏰ {member.mention} are you still in your session?",
                     view=view
                 )
+                view.message = sent_message
 
 
 @bot.tree.command(name="cprofile", description="View your profile")
@@ -352,7 +370,7 @@ async def cview(interaction: discord.Interaction, user: discord.Member):
 
 class TransactionConfirmView(View):
     def __init__(self, sender_id: int, receiver_id: int, amount: int):
-        super().__init__(timeout=30)
+        super().__init__(timeout=config.CONFIRMATION_TIMEOUT)
         self.sender_id = sender_id
         self.receiver_id = receiver_id
         self.amount = amount
@@ -419,10 +437,9 @@ async def csend(interaction: discord.Interaction, user: discord.Member, amount: 
     await interaction.response.send_message(f"💸 {interaction.user.name} wants to send {amount} 🪙 to {user.mention}. Do you accept?", view=view)
     view.message = await interaction.original_response()
 
-
 class RequestConfirmView(View):
     def __init__(self, requester_id: int, target_id: int, amount: int):
-        super().__init__(timeout=30)
+        super().__init__(timeout=config.CONFIRMATION_TIMEOUT)
         self.requester_id = requester_id
         self.target_id = target_id
         self.amount = amount
@@ -494,7 +511,7 @@ async def crequest(interaction: discord.Interaction, user: discord.Member, amoun
 
 class SessionConfirmView(View):
     def __init__(self, initiator: discord.Member, target: discord.Member, price: int):
-        super().__init__(timeout=30)
+        super().__init__(timeout=config.CONFIRMATION_TIMEOUT)
         self.initiator = initiator
         self.target = target
         self.price = price
@@ -607,7 +624,7 @@ async def csex(interaction: discord.Interaction, user: discord.Member):
     
 class SessionSellConfirmView(View):
     def __init__(self, initiator: discord.Member, target: discord.Member, price: int):
-        super().__init__(timeout=30)
+        super().__init__(timeout=config.CONFIRMATION_TIMEOUT)
         self.initiator = initiator
         self.target = target
         self.price = price
@@ -921,19 +938,6 @@ async def cmodview(interaction: discord.Interaction, user: discord.Member):
         ephemeral=True
     )
 
-@bot.tree.command(name="csetcheckinterval", description="Set session check interval in seconds (Mod/Owner only)")
-async def csetcheckinterval(interaction: discord.Interaction, seconds: int):
-    allowed_roles = ["Mod", "Owner"]
-    user_roles = [role.name for role in interaction.user.roles]
-
-    if not any(role in user_roles for role in allowed_roles):
-        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-        return
-
-    set_setting("session_check_interval", seconds)
-    await interaction.response.send_message(f"✅ Session check interval set to {seconds} seconds!")
-
-
 @bot.tree.command(name="csetlogchannel", description="Set the channel for transaction logs (Mod/Owner only)")
 async def csetlogchannel(interaction: discord.Interaction, channel: discord.TextChannel):
     allowed_roles = ["Mod", "Owner"]
@@ -985,7 +989,6 @@ class HelpView(View):
                 "🔸`/cedit @user [field] [value]`\n-# Edit a user's profile\n"
                 "🔸`/creset @user`\n-# Reset a user's stats\n"
                 "🔸`/cendall`\n-# Force close all active sessions\n"
-                "🔸`/csetcheckinterval [seconds]`\n-# Set session check interval\n"
                 "🔸`/csetlogchannel #channel`\n-# Set the transaction log channel\n"
                 "🔸`/cstrike @user [reason]`\n-# Add a strike to a user\n"
                 "🔸`/cunstrike @user [reason]`\n-# Remove a strike from a user\n"
