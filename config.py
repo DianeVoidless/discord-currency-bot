@@ -25,3 +25,40 @@ DAILY_ELIGIBILITY_CHECK_INTERVAL = 300  # seconds between scans for eligible dai
 ACTIVITY_LEADERBOARD_REWARDS = [500, 300, 150]
 SESSION_LEADERBOARD_REWARDS = [750, 450, 250]
 RECEIVED_LEADERBOARD_REWARDS = [400, 250, 125]
+
+# Weekly leaderboard winner rewards (1st, 2nd, 3rd place)
+ACTIVITY_LEADERBOARD_REWARDS = [500, 300, 150]
+SESSION_LEADERBOARD_REWARDS = [750, 450, 250]
+RECEIVED_LEADERBOARD_REWARDS = [400, 250, 125]
+
+# --- Job system ---
+
+# Each job: (min_pay, max_pay, cooldown_seconds)
+JOB_PAY_INFO = {
+    "bartender":     (40, 80, 8 * 60 * 60),
+    "librarian":     (40, 80, 8 * 60 * 60),
+    "gardener":      (40, 80, 8 * 60 * 60),
+    "floor_cleaner": (25, 50, 6 * 60 * 60),
+    "housekeeping":  (25, 50, 6 * 60 * 60),
+    "maintenance":   (60, 110, 10 * 60 * 60),
+    "technician":    (60, 110, 10 * 60 * 60),
+    "sex_worker":    (25, 50, 8 * 60 * 60),
+}
+
+# Which jobs belong to each Job Role (1-4), and what button color represents that role
+JOB_ROLE_GROUPS = {
+    1: {"name": "Skilled Service", "jobs": ["bartender", "librarian", "gardener"], "style": "primary"},   # blurple
+    2: {"name": "Menial", "jobs": ["floor_cleaner", "housekeeping"], "style": "secondary"},               # grey
+    3: {"name": "Technical", "jobs": ["maintenance", "technician"], "style": "success"},                  # green
+    4: {"name": "Sex Worker", "jobs": ["sex_worker"], "style": "danger"},                                 # red
+}
+
+# Which jobs appear on each floor (job buttons get posted here)
+FLOOR_JOBS = {
+    "ground":     ["bartender", "librarian", "gardener", "floor_cleaner", "sex_worker"],
+    "exhibition": ["floor_cleaner", "maintenance", "technician", "sex_worker"],
+    "specialty":  ["housekeeping", "floor_cleaner", "maintenance", "sex_worker"],
+    "vip":        ["bartender", "housekeeping", "floor_cleaner", "technician", "sex_worker"],
+}
+
+JOB_QUIT_LOCKOUT = 2 * 24 * 60 * 60  # 2 days before you can join a new job role after quitting
