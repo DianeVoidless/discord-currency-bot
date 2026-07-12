@@ -51,10 +51,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/chelp for commands"))
     try:
-        guild = discord.Object(id=config.ALLOWED_GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Synced {len(synced)} commands to allowed guild ({config.ALLOWED_GUILD_ID})")
+        guild1 = discord.Object(id=1367183962447024158) # velvet
+        guild2 = discord.Object(id=1312819979384782908) # yellow
+        bot.tree.copy_global_to(guild=guild1)
+        bot.tree.copy_global_to(guild=guild2)
+        synced1 = await bot.tree.sync(guild=guild1)
+        synced2 = await bot.tree.sync(guild=guild2)
+        print(f"Synced {len(synced1)} commands to server 1")
+        print(f"Synced {len(synced2)} commands to server 2")
     except Exception as e:
         print(e)
     print(f"Logged in as {bot.user}")
