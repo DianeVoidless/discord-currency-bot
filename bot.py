@@ -121,20 +121,35 @@ def get_or_create_user(member):
     user_id = member.id
     ref = db.collection("users").document(str(user_id))
     doc = ref.get()
+
+    default_fields = {
+        "username": member.name,
+        "balance": STARTING_BALANCE,
+        "body_count": STARTING_BODY_COUNT,
+        "status": STARTING_STATUS,
+        "house": STARTING_HOUSE,
+        "partners": [],
+        "strikes": 0,
+        "allure_boost_multiplier": None,
+        "allure_boost_sessions_left": 0
+    }
+
     if not doc.exists:
-        ref.set({
-            "username": member.name,
-            "balance": STARTING_BALANCE,
-            "body_count": STARTING_BODY_COUNT,
-            "status": STARTING_STATUS,
-            "house": STARTING_HOUSE,
-            "partners": [],
-            "strikes": 0,
-            "allure_boost_multiplier": None,
-            "allure_boost_sessions_left": 0
-        })
-    else:
-        ref.update({"username": member.name})
+        ref.set(default_fields)
+        return ref.get().to_dict()
+
+    data = doc.to_dict()
+    missing = {k: v for k, v in default_fields.items() if k not in data}
+
+    update_payload = {"username": member.name}
+    if missing:
+        update_payload.update(missing)
+
+    ref.update(update_payload)
+
+    if missing:
+        print(f"[get_or_create_user] Repaired profile for {member.name} ({user_id}): added missing fields {list(missing.keys())}")
+
     return ref.get().to_dict()
 
 def calculate_session_price(body_count: int, multiplier: float = None) -> int:
