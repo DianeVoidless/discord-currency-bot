@@ -51,16 +51,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/chelp for commands"))
     try:
-        guild1 = discord.Object(id=1367183962447024158) # velvet
-        # guild2 = discord.Object(id=1312819979384782908) # yellow
-        bot.tree.copy_global_to(guild=guild1)
-        # bot.tree.copy_global_to(guild=guild2)
-        synced1 = await bot.tree.sync(guild=guild1)
-        # synced2 = await bot.tree.sync(guild=guild2)
-        print(f"Synced {len(synced1)} commands to server 1")
-        # print(f"Synced {len(synced2)} commands to server 2")
+        guild = discord.Object(id=config.ALLOWED_GUILD_ID)
+        bot.tree.copy_global_to(guild=guild)
+        synced = await bot.tree.sync(guild=guild)
+        print(f"Synced {len(synced)} commands to allowed guild ({config.ALLOWED_GUILD_ID})")
     except Exception as e:
-            print(e)
+        print(e)
     print(f"Logged in as {bot.user}")
     bot.loop.create_task(session_check_loop())
     bot.loop.create_task(leaderboard_loop())
@@ -69,6 +65,8 @@ async def on_ready():
 
 @bot.event
 async def on_raw_reaction_add(payload):
+    if payload.guild_id != config.ALLOWED_GUILD_ID:
+        return
     if payload.member is None or payload.member.bot:
         return
 
@@ -84,6 +82,9 @@ async def on_raw_reaction_add(payload):
 
 @bot.event
 async def on_raw_reaction_remove(payload):
+    if payload.guild_id != config.ALLOWED_GUILD_ID:
+        return
+
     emoji = str(payload.emoji)
     role_data = get_reaction_role(payload.message_id, emoji)
     if not role_data:
@@ -100,6 +101,8 @@ async def on_message(message):
     if message.author.bot:
         return
     if message.guild is None:
+        return
+    if message.guild.id != config.ALLOWED_GUILD_ID:
         return
     if message.channel.id in config.EXCLUDED_ACTIVITY_CHANNELS:
         return
@@ -354,6 +357,8 @@ async def log_strike(message: str, guild_id: int):
 
 async def announce_status(message: str):
     for guild in bot.guilds:
+        if guild.id != config.ALLOWED_GUILD_ID:
+            continue
         channel_id = get_setting(f"announce_channel_id_{guild.id}", None)
         if not channel_id:
             continue
@@ -666,6 +671,8 @@ async def daily_eligibility_loop():
         now = time.time()
 
         for guild in bot.guilds:
+            if guild.id != config.ALLOWED_GUILD_ID:
+                continue
             channel_id = get_setting(f"daily_channel_id_{guild.id}", None)
             if not channel_id:
                 continue
@@ -760,6 +767,8 @@ async def leaderboard_loop():
         await asyncio.sleep(seconds_until_next)
 
         for guild in bot.guilds:
+            if guild.id != config.ALLOWED_GUILD_ID:
+                continue
             activity_results = await post_weekly_leaderboard(guild, current_week)
             session_results = await post_weekly_session_leaderboard(guild, current_week)
             received_results = await post_weekly_received_leaderboard(guild, current_week)

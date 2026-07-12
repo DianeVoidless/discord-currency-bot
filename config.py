@@ -2,6 +2,11 @@
 # Constant values used across the bot.
 # Keeping these here (instead of scattered in bot.py) makes them easy to find and tweak.
 
+ALLOWED_GUILD_ID = 1367183962447024158  # the only server this bot instance is allowed to operate in ("Velvet")
+# ALLOWED_GUILD_ID = 1312819979384782908  # the only server this bot instance is allowed to operate in ("Yellow")
+
+CONFIRMATION_TIMEOUT = 300  # seconds a user has to respond to any check before being timing out
+
 CONFIRMATION_TIMEOUT = 300  # seconds a user has to respond to any check before being timing out
 SESSION_CHECK_INTERVAL = 1800  # seconds of inactivity before a session gets an AFK check (1800 = 30 minutes)
 
