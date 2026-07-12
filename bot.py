@@ -51,14 +51,14 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/chelp for commands"))
     try:
-        guild1 = discord.Object(id=1367183962447024158)
-        guild2 = discord.Object(id=1312819979384782908)
+        guild1 = discord.Object(id=1367183962447024158) # velvet
+        # guild2 = discord.Object(id=1312819979384782908) # yellow
         bot.tree.copy_global_to(guild=guild1)
-        bot.tree.copy_global_to(guild=guild2)
+        # bot.tree.copy_global_to(guild=guild2)
         synced1 = await bot.tree.sync(guild=guild1)
-        synced2 = await bot.tree.sync(guild=guild2)
+        # synced2 = await bot.tree.sync(guild=guild2)
         print(f"Synced {len(synced1)} commands to server 1")
-        print(f"Synced {len(synced2)} commands to server 2")
+        # print(f"Synced {len(synced2)} commands to server 2")
     except Exception as e:
             print(e)
     print(f"Logged in as {bot.user}")
@@ -263,8 +263,57 @@ async def pay_leaderboard_winners(guild_id, results, rewards):
         print("[PAYOUT DEBUG] log_channel not found, returning early")
         return
 
-    await log_channel.send("--**💰 Weekly Winner Rewards**--\n\n" + "\n".join(lines))
+    await log_channel.send("**💰 Weekly Winner Rewards**\n\n" + "\n".join(lines))
     print("[PAYOUT DEBUG] Sent successfully")
+    
+async def assign_weekly_vip(guild, activity_results, session_results, received_results):
+    vip_role_id = get_setting(f"vip_role_id_{guild.id}", None)
+    if not vip_role_id:
+        return
+    vip_role = guild.get_role(vip_role_id)
+    if not vip_role:
+        return
+
+    # Strip VIP from everyone who currently has it
+    for member in vip_role.members:
+        try:
+            await member.remove_roles(vip_role, reason="Weekly VIP reset")
+        except Exception as e:
+            print(f"[VIP ERROR] Failed to remove role from {member.id}: {e}")
+
+    assigned_user_ids = set()
+    winners = []
+
+    for board_name, results in [
+        ("Activity", activity_results),
+        ("Sessions", session_results),
+        ("Coins Received", received_results)
+    ]:
+        for doc in results:
+            data = doc.to_dict()
+            user_id = data["user_id"]
+            if user_id in assigned_user_ids:
+                continue  # already claimed VIP from a higher-priority board this week
+
+            member = guild.get_member(user_id)
+            if not member:
+                continue
+
+            try:
+                await member.add_roles(vip_role, reason=f"Weekly VIP winner ({board_name} leaderboard)")
+                assigned_user_ids.add(user_id)
+                winners.append((member, board_name))
+            except Exception as e:
+                print(f"[VIP ERROR] Failed to add role to {user_id}: {e}")
+            break  # move to next leaderboard once someone from this one is assigned
+
+    if winners:
+        leaderboard_channel_id = get_setting(f"leaderboard_channel_id_{guild.id}", None)
+        if leaderboard_channel_id:
+            leaderboard_channel = bot.get_channel(leaderboard_channel_id)
+            if leaderboard_channel:
+                lines = [f"👑 {member.mention} — VIP for topping the **{board_name}** leaderboard!" for member, board_name in winners]
+                await leaderboard_channel.send("**👑 Weekly VIP Winners**\n\n" + "\n".join(lines))
     
 def mark_message_sent_today(user_id: int):
     today = datetime.now(ZoneInfo("Europe/Bucharest")).date().isoformat()
@@ -494,12 +543,12 @@ async def post_weekly_leaderboard(guild, week_start):
     print(f"[LEADERBOARD DEBUG] guild={guild.id}, channel_id={channel_id}")
     if not channel_id:
         print("[LEADERBOARD DEBUG] No channel_id found, returning early")
-        return
+        return []
     channel = bot.get_channel(channel_id)
     print(f"[LEADERBOARD DEBUG] channel object = {channel}")
     if not channel:
         print("[LEADERBOARD DEBUG] bot.get_channel returned None, returning early")
-        return
+        return []
 
     try:
         from google.cloud.firestore_v1.base_query import FieldFilter
@@ -517,7 +566,7 @@ async def post_weekly_leaderboard(guild, week_start):
         if not results:
             print("[LEADERBOARD DEBUG] No results, sending 'no activity' message")
             await channel.send("📊 **Weekly Leaderboard** — no activity recorded this week!")
-            return
+            return []
 
         lines = []
         medals = ["🥇", "🥈", "🥉"]
@@ -526,12 +575,14 @@ async def post_weekly_leaderboard(guild, week_start):
             lines.append(f"{medals[i]} <@{data['user_id']}> — {data['count']} messages")
 
         print("[LEADERBOARD DEBUG] Sending results message")
-        await channel.send("**# 📊 Weekly Leaderboard Results**\n\n" + "\n".join(lines))
+        await channel.send("**📊 Weekly Leaderboard Results**\n\n" + "\n".join(lines))
         print("[LEADERBOARD DEBUG] Message sent successfully")
 
         await pay_leaderboard_winners(guild.id, results, config.ACTIVITY_LEADERBOARD_REWARDS)
+        return results
     except Exception as e:
         print(f"[LEADERBOARD ERROR] {type(e).__name__}: {e}")
+        return []
 
 async def post_weekly_received_leaderboard(guild, week_start):
     channel_id = get_setting(f"leaderboard_channel_id_{guild.id}", None)
@@ -554,7 +605,7 @@ async def post_weekly_received_leaderboard(guild, week_start):
 
         if not results:
             await channel.send("🪙 **Weekly Top Earners** — no coins received this week!")
-            return
+            return []
 
         lines = []
         medals = ["🥇", "🥈", "🥉"]
@@ -562,11 +613,13 @@ async def post_weekly_received_leaderboard(guild, week_start):
             data = doc.to_dict()
             lines.append(f"{medals[i]} <@{data['user_id']}> — {data['total']} 🪙")
 
-        await channel.send("**# 🪙 Weekly Top Earners**\n\n" + "\n".join(lines))
+        await channel.send("**🪙 Weekly Top Earners**\n\n" + "\n".join(lines))
 
         await pay_leaderboard_winners(guild.id, results, config.RECEIVED_LEADERBOARD_REWARDS)
+        return results
     except Exception as e:
         print(f"[RECEIVED LEADERBOARD ERROR] {type(e).__name__}: {e}")
+        return []
 
 async def post_weekly_session_leaderboard(guild, week_start):
     channel_id = get_setting(f"leaderboard_channel_id_{guild.id}", None)
@@ -589,7 +642,7 @@ async def post_weekly_session_leaderboard(guild, week_start):
 
         if not results:
             await channel.send("🔥 **Weekly Session Leaderboard** — no completed sessions this week!")
-            return
+            return []
 
         lines = []
         medals = ["🥇", "🥈", "🥉"]
@@ -597,11 +650,13 @@ async def post_weekly_session_leaderboard(guild, week_start):
             data = doc.to_dict()
             lines.append(f"{medals[i]} <@{data['user_id']}> — {data['count']} session(s)")
 
-        await channel.send("**# 🔥 Weekly Session Leaderboard Results**\n\n" + "\n".join(lines))
+        await channel.send("**🔥 Weekly Session Leaderboard Results**\n\n" + "\n".join(lines))
 
         await pay_leaderboard_winners(guild.id, results, config.SESSION_LEADERBOARD_REWARDS)
+        return results
     except Exception as e:
         print(f"[SESSION LEADERBOARD ERROR] {type(e).__name__}: {e}")
+        return []
 
 async def daily_eligibility_loop():
     await bot.wait_until_ready()
@@ -705,9 +760,10 @@ async def leaderboard_loop():
         await asyncio.sleep(seconds_until_next)
 
         for guild in bot.guilds:
-            await post_weekly_leaderboard(guild, current_week)
-            await post_weekly_session_leaderboard(guild, current_week)
-            await post_weekly_received_leaderboard(guild, current_week)
+            activity_results = await post_weekly_leaderboard(guild, current_week)
+            session_results = await post_weekly_session_leaderboard(guild, current_week)
+            received_results = await post_weekly_received_leaderboard(guild, current_week)
+            await assign_weekly_vip(guild, activity_results, session_results, received_results)
 
 @bot.tree.command(name="cprofile", description="View your profile")
 async def profile(interaction: discord.Interaction):
@@ -1473,6 +1529,18 @@ async def csetdailychannel(interaction: discord.Interaction, channel: discord.Te
     set_setting(f"daily_channel_id_{interaction.guild_id}", channel.id)
     await interaction.response.send_message(f"✅ Daily reward channel set to {channel.mention}!")
 
+@bot.tree.command(name="csetviprole", description="Set the role granted to weekly leaderboard winners (Mod/Owner only)")
+async def csetviprole(interaction: discord.Interaction, role: discord.Role):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [r.name for r in interaction.user.roles]
+
+    if not any(r in user_roles for r in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    set_setting(f"vip_role_id_{interaction.guild_id}", role.id)
+    await interaction.response.send_message(f"✅ VIP role set to {role.mention}!")
+
 @bot.tree.command(name="ctriggerdaily", description="Manually trigger a daily reward ping for a specific user (Mod/Owner only)")
 async def ctriggerdaily(interaction: discord.Interaction, user: discord.Member):
     allowed_roles = ["Mod", "Owner"]
@@ -1549,9 +1617,12 @@ async def ctestleaderboardpost(interaction: discord.Interaction):
 
     await interaction.response.send_message("✅ Triggering test post...", ephemeral=True)
     current_week = get_current_week_start()
-    await post_weekly_leaderboard(interaction.guild, current_week)
-    await post_weekly_session_leaderboard(interaction.guild, current_week)
-    await post_weekly_received_leaderboard(interaction.guild, current_week)
+    activity_results = await post_weekly_leaderboard(interaction.guild, current_week)
+    session_results = await post_weekly_session_leaderboard(interaction.guild, current_week)
+    received_results = await post_weekly_received_leaderboard(interaction.guild, current_week)
+    await assign_weekly_vip(interaction.guild, activity_results, session_results, received_results)
+
+
 
 
 
