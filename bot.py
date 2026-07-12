@@ -1697,7 +1697,9 @@ class HelpView(View):
             (
                 "📖 Activity & Rewards",
                 "🔸`/cleaderboard`\n-# Show the top 3 most active users this week\n"
-                "-# A new leaderboard is also posted automatically every Friday at 2 PM (Romania time)\n\n"
+                "🔸`/csessionleaderboard`\n-# Show the top 3 users with the most completed sessions this week\n"
+                "🔸`/creceivedleaderboard`\n-# Show the top 3 users who received the most coins this week\n"
+                "-# All three leaderboards also post automatically every Friday at 2 PM (Romania time), with top 3 winners on each getting paid coins and a chance at VIP\n\n"
                 "**Daily Reward**\n"
                 "-# Send at least one message each day to become eligible. Once eligible, the bot will ping you in the daily reward channel with a claim button.\n"
                 "-# Claiming builds a streak — the longer your streak, the bigger the reward (up to a cap)."
@@ -1709,13 +1711,22 @@ class HelpView(View):
                 "🔸`/cendall`\n-# Force close all active sessions\n"
                 "🔸`/csetlogchannel #channel`\n-# Set the transaction log channel\n"
                 "🔸`/csetannouncechannel #channel`\n-# Set the bot status announcement channel\n"
-                "🔸`/csetleaderboardchannel #channel`\n-# Set the channel for the automatic weekly leaderboard\n"
+                "🔸`/csetleaderboardchannel #channel`\n-# Set the channel for the automatic weekly leaderboards\n"
                 "🔸`/csetdailychannel #channel`\n-# Set the channel for daily reward claim pings\n"
+                "🔸`/csetviprole @role`\n-# Set the role granted to weekly leaderboard winners\n"
                 "🔸`/cstrike @user [reason]`\n-# Add a strike to a user\n"
                 "🔸`/cunstrike @user [reason]`\n-# Remove a strike from a user\n"
                 "🔸`/cmodview @user`\n-# View a user's full profile including strikes\n"
                 "🔸`/csetstrikelogchannel #channel`\n-# Set the strike log channel\n"
-                "🔸`/csetreactionrole [message_id] [emoji] [role]`\n-# Set up a reaction role"
+                "🔸`/csetreactionrole [message_id] [emoji] [role]`\n-# Set up a reaction role\n"
+                "🔸`/cfixprofiles`\n-# Backfill any missing fields on incomplete user profiles"
+            ),
+            (
+                "📖 Trigger / Test Commands (Mod/Owner only)",
+                "-# These manually trigger things that would normally happen automatically — useful for testing or forcing an early run.\n\n"
+                "🔸`/ctriggerdaily @user`\n-# Manually send a daily reward ping to a specific user\n"
+                "🔸`/ctestdailyping`\n-# Manually send yourself a daily reward ping\n"
+                "🔸`/ctestleaderboardpost`\n-# Manually trigger all 3 weekly leaderboard posts, payouts, and VIP assignment"
             )
         ]
 
