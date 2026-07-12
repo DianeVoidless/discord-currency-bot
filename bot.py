@@ -165,7 +165,23 @@ def get_current_week_start():
 
     return week_start
 
+def get_leaderboard_top3(collection_name, guild_id, week_start, order_field):
+    from google.cloud.firestore_v1.base_query import FieldFilter
+    query = (
+        db.collection(collection_name)
+        .where(filter=FieldFilter("guild_id", "==", guild_id))
+        .where(filter=FieldFilter("week_start", "==", week_start.isoformat()))
+        .order_by(order_field, direction=firestore.Query.DESCENDING)
+        .limit(10)
+    )
+    all_results = list(query.stream())
+
+    filtered = [doc for doc in all_results if doc.to_dict()["user_id"] not in config.EXCLUDED_DAILY_USERS]
+    return filtered[:3]
+
 def increment_activity_count(guild_id: int, user_id: int):
+    if user_id in config.EXCLUDED_DAILY_USERS:
+        return
     current_week = get_current_week_start()
     doc_id = f"{guild_id}_{user_id}"
     ref = db.collection("activity").document(doc_id)
@@ -188,6 +204,8 @@ def increment_activity_count(guild_id: int, user_id: int):
     })
     
 def increment_session_count(guild_id: int, user_id: int):
+    if user_id in config.EXCLUDED_DAILY_USERS:
+        return
     current_week = get_current_week_start()
     doc_id = f"{guild_id}_{user_id}"
     ref = db.collection("session_activity").document(doc_id)
@@ -210,6 +228,8 @@ def increment_session_count(guild_id: int, user_id: int):
     })
     
 def increment_coins_received(guild_id: int, user_id: int, amount: int):
+    if user_id in config.EXCLUDED_DAILY_USERS:
+        return
     current_week = get_current_week_start()
     doc_id = f"{guild_id}_{user_id}"
     ref = db.collection("coins_received").document(doc_id)
@@ -235,12 +255,17 @@ async def pay_leaderboard_winners(guild_id, results, rewards):
     print(f"[PAYOUT DEBUG] Called with guild_id={guild_id}, {len(results)} result(s), rewards={rewards}")
     lines = []
     medals = ["🥇", "🥈", "🥉"]
-    for i, doc in enumerate(results):
-        if i >= len(rewards):
+    rank = 0
+    for doc in results:
+        if rank >= len(rewards):
             break
         data = doc.to_dict()
         user_id = data["user_id"]
-        reward = rewards[i]
+        if user_id in config.EXCLUDED_DAILY_USERS:
+            continue
+        reward = rewards[rank]
+        i = rank
+        rank += 1
 
         ref = db.collection("users").document(str(user_id))
         user_doc = ref.get()
@@ -299,6 +324,8 @@ async def assign_weekly_vip(guild, activity_results, session_results, received_r
         for doc in results:
             data = doc.to_dict()
             user_id = data["user_id"]
+            if user_id in config.EXCLUDED_DAILY_USERS:
+                continue
             if user_id in assigned_user_ids:
                 continue  # already claimed VIP from a higher-priority board this week
 
@@ -560,16 +587,8 @@ async def post_weekly_leaderboard(guild, week_start):
         return []
 
     try:
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        query = (
-            db.collection("activity")
-            .where(filter=FieldFilter("guild_id", "==", guild.id))
-            .where(filter=FieldFilter("week_start", "==", week_start.isoformat()))
-            .order_by("count", direction=firestore.Query.DESCENDING)
-            .limit(3)
-        )
         print(f"[LEADERBOARD DEBUG] Querying with week_start={week_start.isoformat()}")
-        results = list(query.stream())
+        results = get_leaderboard_top3("activity", guild.id, week_start, "count")
         print(f"[LEADERBOARD DEBUG] Got {len(results)} result(s)")
 
         if not results:
@@ -602,15 +621,7 @@ async def post_weekly_received_leaderboard(guild, week_start):
         return
 
     try:
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        query = (
-            db.collection("coins_received")
-            .where(filter=FieldFilter("guild_id", "==", guild.id))
-            .where(filter=FieldFilter("week_start", "==", week_start.isoformat()))
-            .order_by("total", direction=firestore.Query.DESCENDING)
-            .limit(3)
-        )
-        results = list(query.stream())
+        results = get_leaderboard_top3("coins_received", guild.id, week_start, "total")
 
         if not results:
             await channel.send("🪙 **Weekly Top Earners** — no coins received this week!")
@@ -639,15 +650,7 @@ async def post_weekly_session_leaderboard(guild, week_start):
         return
 
     try:
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        query = (
-            db.collection("session_activity")
-            .where(filter=FieldFilter("guild_id", "==", guild.id))
-            .where(filter=FieldFilter("week_start", "==", week_start.isoformat()))
-            .order_by("count", direction=firestore.Query.DESCENDING)
-            .limit(3)
-        )
-        results = list(query.stream())
+        results = get_leaderboard_top3("session_activity", guild.id, week_start, "count")
 
         if not results:
             await channel.send("🔥 **Weekly Session Leaderboard** — no completed sessions this week!")
@@ -812,16 +815,7 @@ async def cleaderboard(interaction: discord.Interaction):
 
     try:
         current_week = get_current_week_start()
-
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        query = (
-            db.collection("activity")
-            .where(filter=FieldFilter("guild_id", "==", interaction.guild_id))
-            .where(filter=FieldFilter("week_start", "==", current_week.isoformat()))
-            .order_by("count", direction=firestore.Query.DESCENDING)
-            .limit(3)
-        )
-        results = list(query.stream())
+        results = get_leaderboard_top3("activity", interaction.guild_id, current_week, "count")
 
         if not results:
             await interaction.followup.send("No activity recorded yet this week!")
@@ -848,16 +842,7 @@ async def csessionleaderboard(interaction: discord.Interaction):
 
     try:
         current_week = get_current_week_start()
-
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        query = (
-            db.collection("session_activity")
-            .where(filter=FieldFilter("guild_id", "==", interaction.guild_id))
-            .where(filter=FieldFilter("week_start", "==", current_week.isoformat()))
-            .order_by("count", direction=firestore.Query.DESCENDING)
-            .limit(3)
-        )
-        results = list(query.stream())
+        results = get_leaderboard_top3("session_activity", interaction.guild_id, current_week, "count")
 
         if not results:
             await interaction.followup.send("No completed sessions recorded yet this week!")
@@ -884,16 +869,7 @@ async def creceivedleaderboard(interaction: discord.Interaction):
 
     try:
         current_week = get_current_week_start()
-
-        from google.cloud.firestore_v1.base_query import FieldFilter
-        query = (
-            db.collection("coins_received")
-            .where(filter=FieldFilter("guild_id", "==", interaction.guild_id))
-            .where(filter=FieldFilter("week_start", "==", current_week.isoformat()))
-            .order_by("total", direction=firestore.Query.DESCENDING)
-            .limit(3)
-        )
-        results = list(query.stream())
+        results = get_leaderboard_top3("coins_received", interaction.guild_id, current_week, "total")
 
         if not results:
             await interaction.followup.send("No coins received yet this week!")
