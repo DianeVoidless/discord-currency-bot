@@ -50,6 +50,12 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 @bot.event
 async def on_ready():
     await bot.change_presence(activity=discord.Game(name="/chelp for commands"))
+
+    bot.add_view(JobRoleSelectView())
+    for floor_name in config.FLOOR_JOBS:
+        bot.add_view(JobButtonView(floor_name))
+    print("Registered persistent job views")
+
     try:
         guild1 = discord.Object(id=1367183962447024158) # velvet
         guild2 = discord.Object(id=1312819979384782908) # yellow
@@ -131,7 +137,10 @@ def get_or_create_user(member):
         "partners": [],
         "strikes": 0,
         "allure_boost_multiplier": None,
-        "allure_boost_sessions_left": 0
+        "allure_boost_sessions_left": 0,
+        "current_job_role": None,
+        "job_quit_lockout_until": None,
+        "job_cooldowns": {}
     }
 
     if not doc.exists:
@@ -774,6 +783,190 @@ class DailyClaimView(View):
         streak_text = f"{new_streak} day" if new_streak == 1 else f"{new_streak} days"
         await interaction.followup.send(
             f"✅ You claimed **{reward} 🪙**! (Streak: {streak_text})",
+            ephemeral=True
+        )
+
+STYLE_MAP = {
+    "primary": discord.ButtonStyle.primary,
+    "secondary": discord.ButtonStyle.secondary,
+    "success": discord.ButtonStyle.success,
+    "danger": discord.ButtonStyle.danger,
+}
+
+class JobRoleSelectView(View):
+    def __init__(self):
+        super().__init__(timeout=None)  # permanent board, always usable
+        for role_number, role_info in config.JOB_ROLE_GROUPS.items():
+            self.add_item(self.make_join_button(role_number, role_info))
+        self.add_item(self.make_quit_button())
+
+    def make_join_button(self, role_number, role_info):
+        button = Button(
+            label=f"Join ({role_info['name']})",
+            style=STYLE_MAP[role_info["style"]],
+            custom_id=f"job_role_join_{role_number}"
+        )
+
+        async def callback(interaction: discord.Interaction):
+            await self.handle_join(interaction, role_number)
+
+        button.callback = callback
+        return button
+
+    def make_quit_button(self):
+        button = Button(label="Quit Current Job", style=discord.ButtonStyle.secondary, row=1, custom_id="job_role_quit")
+
+        async def callback(interaction: discord.Interaction):
+            await self.handle_quit(interaction)
+
+        button.callback = callback
+        return button
+
+    async def handle_join(self, interaction: discord.Interaction, role_number: int):
+        user_data = get_or_create_user(interaction.user)
+        now = time.time()
+
+        if user_data.get("current_job_role"):
+            await interaction.response.send_message(
+                "❌ You already have a job! Quit first before picking a new one.",
+                ephemeral=True
+            )
+            return
+
+        lockout_until = user_data.get("job_quit_lockout_until")
+        if lockout_until and now < lockout_until:
+            remaining = int(lockout_until - now)
+            hours = remaining // 3600
+            minutes = (remaining % 3600) // 60
+            await interaction.response.send_message(
+                f"❌ You quit recently! You can join a new job in {hours}h {minutes}m.",
+                ephemeral=True
+            )
+            return
+
+        role_id = get_setting(f"job_role_{role_number}_id_{interaction.guild_id}", None)
+        if not role_id:
+            await interaction.response.send_message(
+                f"❌ Job Role {role_number} hasn't been set up yet! Ask a Mod/Owner to run /csetjobrole.",
+                ephemeral=True
+            )
+            return
+
+        role = interaction.guild.get_role(role_id)
+        if not role:
+            await interaction.response.send_message("❌ Couldn't find that role on the server!", ephemeral=True)
+            return
+
+        try:
+            await interaction.user.add_roles(role, reason="Joined job role")
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Couldn't assign the role: {e}", ephemeral=True)
+            return
+
+        db.collection("users").document(str(interaction.user.id)).update({"current_job_role": role_number})
+
+        role_name = config.JOB_ROLE_GROUPS[role_number]["name"]
+        await interaction.response.send_message(
+            f"✅ You're now working as **Job Role {role_number} ({role_name})**!",
+            ephemeral=True
+        )
+
+    async def handle_quit(self, interaction: discord.Interaction):
+        user_data = get_or_create_user(interaction.user)
+        current_role_number = user_data.get("current_job_role")
+
+        if not current_role_number:
+            await interaction.response.send_message("❌ You don't currently have a job!", ephemeral=True)
+            return
+
+        role_id = get_setting(f"job_role_{current_role_number}_id_{interaction.guild_id}", None)
+        if role_id:
+            role = interaction.guild.get_role(role_id)
+            if role:
+                try:
+                    await interaction.user.remove_roles(role, reason="Quit job role")
+                except Exception as e:
+                    print(f"[JOB ERROR] Failed to remove role from {interaction.user.id}: {e}")
+
+        lockout_until = time.time() + config.JOB_QUIT_LOCKOUT
+        db.collection("users").document(str(interaction.user.id)).update({
+            "current_job_role": None,
+            "job_quit_lockout_until": lockout_until
+        })
+
+        await interaction.response.send_message(
+            "✅ You've quit your job. You can join a new one in 2 days.",
+            ephemeral=True
+        )
+
+def get_job_role_number(job_name):
+    for role_number, role_info in config.JOB_ROLE_GROUPS.items():
+        if job_name in role_info["jobs"]:
+            return role_number
+    return None
+
+class JobButtonView(View):
+    def __init__(self, floor_name):
+        super().__init__(timeout=None)  # permanent, always usable
+        self.floor_name = floor_name
+        for job_name in config.FLOOR_JOBS[floor_name]:
+            self.add_item(self.make_job_button(job_name))
+
+    def make_job_button(self, job_name):
+        role_number = get_job_role_number(job_name)
+        style = STYLE_MAP[config.JOB_ROLE_GROUPS[role_number]["style"]]
+        label = job_name.replace("_", " ").title()
+
+        button = Button(label=label, style=style, custom_id=f"job_button_{job_name}_{self.floor_name}")
+
+        async def callback(interaction: discord.Interaction):
+            await self.handle_job_click(interaction, job_name)
+
+        button.callback = callback
+        return button
+
+    async def handle_job_click(self, interaction: discord.Interaction, job_name: str):
+        user_data = get_or_create_user(interaction.user)
+        required_role_number = get_job_role_number(job_name)
+
+        if user_data.get("current_job_role") != required_role_number:
+            await interaction.response.send_message(
+                f"❌ You need to be working **Job Role {required_role_number}** to do this job!",
+                ephemeral=True
+            )
+            return
+
+        cooldown_key = f"{job_name}_{self.floor_name}"
+        job_cooldowns = user_data.get("job_cooldowns", {})
+        last_claim = job_cooldowns.get(cooldown_key)
+
+        min_pay, max_pay, cooldown_seconds = config.JOB_PAY_INFO[job_name]
+        now = time.time()
+
+        if last_claim is not None and (now - last_claim) < cooldown_seconds:
+            remaining = int(cooldown_seconds - (now - last_claim))
+            hours = remaining // 3600
+            minutes = (remaining % 3600) // 60
+            await interaction.response.send_message(
+                f"❌ You're still on cooldown for this job here! Try again in {hours}h {minutes}m.",
+                ephemeral=True
+            )
+            return
+
+        import random
+        reward = random.randint(min_pay, max_pay)
+
+        job_cooldowns[cooldown_key] = now
+        ref = db.collection("users").document(str(interaction.user.id))
+        ref.update({
+            "balance": user_data["balance"] + reward,
+            "job_cooldowns": job_cooldowns
+        })
+        increment_coins_received(interaction.guild_id, interaction.user.id, reward)
+
+        job_label = job_name.replace("_", " ").title()
+        await interaction.response.send_message(
+            f"✅ You worked as a **{job_label}** and earned **{reward} 🪙**!",
             ephemeral=True
         )
 
@@ -1544,6 +1737,97 @@ async def csetviprole(interaction: discord.Interaction, role: discord.Role):
 
     set_setting(f"vip_role_id_{interaction.guild_id}", role.id)
     await interaction.response.send_message(f"✅ VIP role set to {role.mention}!")
+    
+@bot.tree.command(name="cclearjoblockout", description="Clear a user's job-quit lockout, letting them join a job role early (Mod/Owner only)")
+async def cclearjoblockout(interaction: discord.Interaction, user: discord.Member):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [r.name for r in interaction.user.roles]
+
+    if not any(r in user_roles for r in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    try:
+        get_or_create_user(user)
+        db.collection("users").document(str(user.id)).update({"job_quit_lockout_until": None})
+        await interaction.response.send_message(f"✅ Cleared {user.mention}'s job-quit lockout. They can join a new job role now.", ephemeral=True)
+    except Exception as e:
+        print(f"[JOB LOCKOUT CLEAR ERROR] {type(e).__name__}: {e}")
+        await interaction.response.send_message(f"❌ Something went wrong: {e}", ephemeral=True)
+
+@bot.tree.command(name="csetjobrole", description="Link a Discord role to one of the 4 Job Roles (Mod/Owner only)")
+@app_commands.describe(job_role_number="Which Job Role this is (1-4)", role="The Discord role to link")
+async def csetjobrole(interaction: discord.Interaction, job_role_number: int, role: discord.Role):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [r.name for r in interaction.user.roles]
+
+    if not any(r in user_roles for r in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if job_role_number not in [1, 2, 3, 4]:
+        await interaction.response.send_message("❌ job_role_number must be 1, 2, 3, or 4!", ephemeral=True)
+        return
+
+    try:
+        set_setting(f"job_role_{job_role_number}_id_{interaction.guild_id}", role.id)
+        await interaction.response.send_message(f"✅ Job Role {job_role_number} linked to {role.mention}!")
+    except Exception as e:
+        print(f"[JOB ROLE SET ERROR] {type(e).__name__}: {e}")
+        await interaction.response.send_message(f"❌ Something went wrong: {e}", ephemeral=True)
+
+@bot.tree.command(name="cpostjobselect", description="Post the job role select board to a channel (Mod/Owner only)")
+async def cpostjobselect(interaction: discord.Interaction, channel: discord.TextChannel):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [r.name for r in interaction.user.roles]
+
+    if not any(r in user_roles for r in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    try:
+        view = JobRoleSelectView()
+        await channel.send(
+            "**# 💼 Choose Your Job Role**\n\n"
+            "Pick a Job Role below to start working!\n- You can only hold one job role at a time.\n"
+            "**- Quitting locks you out of joining a new one for `2` days**"" - After you select your profession, go through https://discordapp.com/channels/1367183962447024158/1525894786446393395, https://discordapp.com/channels/1367183962447024158/1525894810811240670, https://discordapp.com/channels/1367183962447024158/1525894841639370753, https://discordapp.com/channels/1367183962447024158/1525894858739290173 and see what tasks you can complete.\n"
+            "- Each profession has a differently color-coded button.\n",
+            view=view
+        )
+        await interaction.response.send_message(f"✅ Job select board posted to {channel.mention}!", ephemeral=True)
+    except Exception as e:
+        print(f"[JOB SELECT ERROR] {type(e).__name__}: {e}")
+        await interaction.response.send_message(f"❌ Something went wrong: {e}", ephemeral=True)
+
+@bot.tree.command(name="cpostjobboard", description="Post job buttons for a specific floor to a channel (Mod/Owner only)")
+@app_commands.describe(floor="Which floor's jobs to post")
+@app_commands.choices(floor=[
+    app_commands.Choice(name="Ground Floor", value="ground"),
+    app_commands.Choice(name="Exhibition Floor", value="exhibition"),
+    app_commands.Choice(name="Specialty Floor", value="specialty"),
+    app_commands.Choice(name="VIP Level", value="vip"),
+])
+async def cpostjobboard(interaction: discord.Interaction, floor: app_commands.Choice[str], channel: discord.TextChannel):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [r.name for r in interaction.user.roles]
+
+    if not any(r in user_roles for r in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    try:
+        view = JobButtonView(floor.value)
+        job_names = ", ".join(j.replace("_", " ").title() for j in config.FLOOR_JOBS[floor.value])
+        await channel.send(
+            f"**# 💼 {floor.name} Jobs**\n\n"
+            f"Available jobs here: **{job_names}**\n"
+            f"You must hold the correct Job Role to work any of these.\n",
+            view=view
+        )
+        await interaction.response.send_message(f"✅ {floor.name} job board posted to {channel.mention}!", ephemeral=True)
+    except Exception as e:
+        print(f"[JOB BOARD ERROR] {type(e).__name__}: {e}")
+        await interaction.response.send_message(f"❌ Something went wrong: {e}", ephemeral=True)
 
 @bot.tree.command(name="ctriggerdaily", description="Manually trigger a daily reward ping for a specific user (Mod/Owner only)")
 async def ctriggerdaily(interaction: discord.Interaction, user: discord.Member):
@@ -1703,6 +1987,19 @@ class HelpView(View):
                 "**Daily Reward**\n"
                 "-# Send at least one message each day to become eligible. Once eligible, the bot will ping you in the daily reward channel with a claim button.\n"
                 "-# Claiming builds a streak — the longer your streak, the bigger the reward (up to a cap)."
+            ),
+            (
+                "📖 Jobs",
+                "**How it works**\n"
+                "-# Pick a Job Role on the job select board — you can only hold one at a time. Each role gives you access to a few specific jobs.\n"
+                "-# Job buttons are posted in each floor's job channel. You must hold the matching Job Role to work a job button.\n"
+                "-# Each job button pays out a random amount and goes on its own cooldown — the same job on different floors has separate cooldowns.\n"
+                "-# Quitting your Job Role is instant and free, but locks you out of joining a new one for 2 days.\n\n"
+                "**Mod/Owner Only**\n"
+                "🔸`/csetjobrole [1-4] @role`\n-# Link a Discord role to one of the 4 Job Roles\n"
+                "🔸`/cpostjobselect #channel`\n-# Post the job role select board\n"
+                "🔸`/cpostjobboard [floor] #channel`\n-# Post job buttons for a specific floor\n"
+                "🔸`/cclearjoblockout @user`\n-# Clear a user's job-quit lockout early"
             ),
             (
                 "📖 Mod/Owner Only",
