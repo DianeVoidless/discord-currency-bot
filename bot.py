@@ -528,13 +528,15 @@ class SessionCheckView(View):
         if session_data:
             session_data.get("awaiting_confirmation", set()).discard(self.user_id)
 
+            afk_checks_passed = session_data.setdefault("afk_checks_passed", {})
+            afk_checks_passed[self.user_id] = afk_checks_passed.get(self.user_id, 0) + 1
+
             if not session_data.get("awaiting_confirmation"):
                 # everyone has confirmed, restart the timer
                 pending_checks.discard(self.session_id)
                 session_data["last_active"] = time.time()
 
         await interaction.response.edit_message(content=f"✅ {interaction.user.name} confirmed they're still active!", view=None)
-
     @discord.ui.button(label="No, end session", style=discord.ButtonStyle.red)
     async def end_session(self, interaction: discord.Interaction, button: Button):
         if interaction.user.id != self.user_id:
@@ -1301,7 +1303,9 @@ class SessionConfirmView(View):
             "payer_id": target_id,
             "payee_id": initiator_id,
             "price": self.price,
-            "last_active": time.time()
+            "last_active": time.time(),
+            "started_at": time.time(),
+            "afk_checks_passed": {}
         }
         active_sessions[initiator_id] = session_id
         active_sessions[target_id] = session_id
@@ -1434,7 +1438,9 @@ class SessionSellConfirmView(View):
             "payer_id": target_id,
             "payee_id": initiator_id,
             "price": self.price,
-            "last_active": time.time()
+            "last_active": time.time(),
+            "started_at": time.time(),
+            "afk_checks_passed": {}
         }
         active_sessions[initiator_id] = session_id
         active_sessions[target_id] = session_id
@@ -2037,7 +2043,8 @@ class HelpView(View):
                 "🔸`/csetstrikelogchannel #channel`\n-# Set the strike log channel\n"
                 "🔸`/csetreactionrole [message_id] [emoji] [role]`\n-# Set up a reaction role\n"
                 "🔸`/cfixprofiles`\n-# Backfill any missing fields on incomplete user profiles\n"
-                "🔸`/cpostperk [perk] #channel`\n-# Post a perk (Virginity Reset or Allure Boost) to a channel"
+                "🔸`/cpostperk [perk] #channel`\n-# Post a perk (Virginity Reset or Allure Boost) to a channel\n"
+                "🔸`/csessionoverview`\n-# Show all ongoing sessions with members, start time, and AFK check history"
             ),
             (
                 "📖 Trigger / Test Commands (Mod/Owner only)",
@@ -2087,6 +2094,51 @@ async def cendall(interaction: discord.Interaction):
 
     await interaction.response.send_message(f"✅ Force closed {count} active session(s). No stats were updated.")
 
+@bot.tree.command(name="csessionoverview", description="Show all ongoing sessions with members, start time, and AFK check history (Mod/Owner only)")
+async def csessionoverview(interaction: discord.Interaction):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if not sessions:
+        await interaction.response.send_message("There are no active sessions!", ephemeral=True)
+        return
+
+    now = time.time()
+    blocks = []
+
+    for session_id, session_data in sessions.items():
+        started_at = session_data.get("started_at")
+        duration_str = "unknown"
+        if started_at:
+            elapsed = int(now - started_at)
+            hours = elapsed // 3600
+            minutes = (elapsed % 3600) // 60
+            duration_str = f"{hours}h {minutes}m ago"
+
+        afk_checks_passed = session_data.get("afk_checks_passed", {})
+        member_lines = []
+        for member_id in session_data["members"]:
+            passed = afk_checks_passed.get(member_id, 0)
+            member_lines.append(f"  • <@{member_id}> — {passed} successful AFK check(s)")
+
+        block = (
+            f"**Session `{session_id[:8]}`**\n"
+            f"Started: {duration_str}\n"
+            + "\n".join(member_lines)
+        )
+        blocks.append(block)
+
+    full_text = "**🔍 Active Sessions Overview**\n\n" + "\n\n".join(blocks)
+
+    if len(full_text) > 1900:
+        await interaction.response.send_message("There are too many active sessions to display at once — consider trimming with /cendall.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(full_text, ephemeral=True)
 
 @bot.tree.command(name="csetstrikelogchannel", description="Set the channel for strike logs (Mod/Owner only)")
 async def csetstrikelogchannel(interaction: discord.Interaction, channel: discord.TextChannel):
