@@ -55,6 +55,12 @@ async def on_ready():
     for floor_name in config.FLOOR_JOBS:
         bot.add_view(JobButtonView(floor_name))
     print("Registered persistent job views")
+    bot.add_view(PerkBuyView(["virginity_reset"]))
+    bot.add_view(PerkBuyView(["allure_tier1", "allure_tier2", "allure_tier3"]))
+    print("Registered persistent perk views")
+
+    bot.add_dynamic_items(DailyClaimButton)
+    print("Registered dynamic daily claim button")
 
     try:
         guild1 = discord.Object(id=1367183962447024158) # velvet
@@ -733,20 +739,32 @@ async def daily_eligibility_loop():
                 if data.get("daily_reminder_sent"):
                     continue
 
-                view = DailyClaimView(member.id)
+                view = View(timeout=None)
+                view.add_item(DailyClaimButton(member.id))
                 await channel.send(
                     f"🪙 {member.mention}, your daily reward is ready! Click below to claim it.",
                     view=view
                 )
                 ref.update({"daily_reminder_sent": True})
 
-class DailyClaimView(View):
+class DailyClaimButton(discord.ui.DynamicItem[discord.ui.Button], template=r"daily_claim:(?P<user_id>[0-9]+)"):
     def __init__(self, user_id: int):
-        super().__init__(timeout=None)  # stays clickable until claimed, no expiry
+        super().__init__(
+            discord.ui.Button(
+                label="Claim Daily Reward",
+                style=discord.ButtonStyle.green,
+                emoji="🪙",
+                custom_id=f"daily_claim:{user_id}"
+            )
+        )
         self.user_id = user_id
 
-    @discord.ui.button(label="Claim Daily Reward", style=discord.ButtonStyle.green, emoji="🪙")
-    async def claim(self, interaction: discord.Interaction, button: Button):
+    @classmethod
+    async def from_custom_id(cls, interaction, item, match):
+        user_id = int(match["user_id"])
+        return cls(user_id)
+
+    async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("This isn't your claim!", ephemeral=True)
             return
@@ -777,8 +795,8 @@ class DailyClaimView(View):
         })
         increment_coins_received(interaction.guild_id, interaction.user.id, reward)
 
-        button.disabled = True
-        await interaction.response.edit_message(view=self)
+        self.item.disabled = True
+        await interaction.response.edit_message(view=self.view)
 
         streak_text = f"{new_streak} day" if new_streak == 1 else f"{new_streak} days"
         await interaction.followup.send(
@@ -1850,7 +1868,8 @@ async def ctriggerdaily(interaction: discord.Interaction, user: discord.Member):
     get_or_create_user(user)
     db.collection("users").document(str(user.id)).update({"daily_reminder_sent": False})
 
-    view = DailyClaimView(user.id)
+    view = View(timeout=None)
+    view.add_item(DailyClaimButton(user.id))
     await channel.send(
         f"🪙 {user.mention}, your daily reward is ready! Click below to claim it.",
         view=view
@@ -1879,7 +1898,8 @@ async def ctestdailyping(interaction: discord.Interaction):
     mark_message_sent_today(interaction.user.id)
     db.collection("users").document(str(interaction.user.id)).update({"daily_reminder_sent": False})
 
-    view = DailyClaimView(interaction.user.id)
+    view = View(timeout=None)
+    view.add_item(DailyClaimButton(interaction.user.id))
     await channel.send(
         f"🪙 {interaction.user.mention}, your daily reward is ready! Click below to claim it.",
         view=view
@@ -2016,7 +2036,8 @@ class HelpView(View):
                 "🔸`/cmodview @user`\n-# View a user's full profile including strikes\n"
                 "🔸`/csetstrikelogchannel #channel`\n-# Set the strike log channel\n"
                 "🔸`/csetreactionrole [message_id] [emoji] [role]`\n-# Set up a reaction role\n"
-                "🔸`/cfixprofiles`\n-# Backfill any missing fields on incomplete user profiles"
+                "🔸`/cfixprofiles`\n-# Backfill any missing fields on incomplete user profiles\n"
+                "🔸`/cpostperk [perk] #channel`\n-# Post a perk (Virginity Reset or Allure Boost) to a channel"
             ),
             (
                 "📖 Trigger / Test Commands (Mod/Owner only)",
@@ -2100,21 +2121,27 @@ async def csetreactionrole(interaction: discord.Interaction, message_id: str, em
     await interaction.response.send_message(f"✅ Reaction role set! React with {emoji} on that message to get {role.mention}.", ephemeral=True)
 
 class PerkBuyView(View):
-    def __init__(self, perks: list):
+    def __init__(self, perk_keys: list):
         super().__init__(timeout=None)
-        for perk in perks:
-            self.add_item(self.make_button(perk))
+        for perk_key in perk_keys:
+            self.add_item(self.make_button(perk_key))
 
-    def make_button(self, perk):
-        button = Button(label=f"{perk['label']} — {perk['price']} 🪙", style=discord.ButtonStyle.green)
+    def make_button(self, perk_key):
+        perk = config.PERKS[perk_key]
+        button = Button(
+            label=f"{perk['label']} — {perk['price']} 🪙",
+            style=discord.ButtonStyle.green,
+            custom_id=f"perk_buy_{perk_key}"
+        )
 
         async def callback(interaction: discord.Interaction):
-            await self.handle_purchase(interaction, perk)
+            await self.handle_purchase(interaction, perk_key)
 
         button.callback = callback
         return button
 
-    async def handle_purchase(self, interaction: discord.Interaction, perk):
+    async def handle_purchase(self, interaction: discord.Interaction, perk_key: str):
+        perk = config.PERKS[perk_key]
         user_data = get_or_create_user(interaction.user)
 
         if user_data["balance"] < perk["price"]:
@@ -2144,7 +2171,7 @@ class PerkBuyView(View):
 
         await log_transaction(f"🛍️ Perk Purchase: <@{interaction.user.id}> bought **{perk['label']}** for {perk['price']} 🪙", interaction.guild_id)
         await interaction.response.send_message(f"✅ You bought **{perk['label']}**! Your stats have been updated.", ephemeral=True)
-
+        
 @bot.tree.command(name="cpostperk", description="Post a perk to a channel (Mod/Owner only)")
 @app_commands.describe(perk="Which perk to post", channel="Where to post it")
 @app_commands.choices(perk=[
@@ -2161,9 +2188,7 @@ async def cpostperk(interaction: discord.Interaction, perk: app_commands.Choice[
 
     if perk.value == "virginity_reset":
         description = "🌸 **Virginity Perk**\n-# Reclaim your innocence. Resets your status back to virgin, your body count to 0, and clears your partner history."
-        perks = [
-            {"label": "Buy", "price": 10000, "effect": "virginity_reset"}
-        ]
+        perk_keys = ["virginity_reset"]
 
     elif perk.value == "allure_boost":
         description = (
@@ -2173,13 +2198,9 @@ async def cpostperk(interaction: discord.Interaction, perk: app_commands.Choice[
             "**Tier II** — +50% price for 5 sessions\n"
             "**Tier III** — +90% price for 2 sessions"
         )
-        perks = [
-            {"label": "Tier I", "price": 4000, "effect": "allure_boost", "multiplier": 0.1, "sessions": 3},
-            {"label": "Tier II", "price": 5000, "effect": "allure_boost", "multiplier": 0.5, "sessions": 5},
-            {"label": "Tier III", "price": 6000, "effect": "allure_boost", "multiplier": 0.9, "sessions": 2}
-        ]
+        perk_keys = ["allure_tier1", "allure_tier2", "allure_tier3"]
 
-    view = PerkBuyView(perks)
+    view = PerkBuyView(perk_keys)
     await channel.send(description, view=view)
     await interaction.response.send_message(f"✅ Perk posted to {channel.mention}!", ephemeral=True)
 

@@ -62,3 +62,11 @@ FLOOR_JOBS = {
 }
 
 JOB_QUIT_LOCKOUT = 2 * 24 * 60 * 60  # 2 days before you can join a new job role after quitting
+
+# --- Perks ---
+PERKS = {
+    "virginity_reset": {"label": "Buy", "price": 10000, "effect": "virginity_reset"},
+    "allure_tier1": {"label": "Tier I", "price": 4000, "effect": "allure_boost", "multiplier": 0.1, "sessions": 3},
+    "allure_tier2": {"label": "Tier II", "price": 5000, "effect": "allure_boost", "multiplier": 0.5, "sessions": 5},
+    "allure_tier3": {"label": "Tier III", "price": 6000, "effect": "allure_boost", "multiplier": 0.9, "sessions": 2},
+}
