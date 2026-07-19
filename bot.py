@@ -2093,7 +2093,7 @@ class HelpView(View):
                 "🔸`/cleaderboard`\n-# Show the top 3 most active users this week\n"
                 "🔸`/csessionleaderboard`\n-# Show the top 3 users with the most completed sessions this week\n"
                 "🔸`/creceivedleaderboard`\n-# Show the top 3 users who received the most coins this week\n"
-                "-# All three leaderboards also post automatically every Friday at 2 PM (Romania time), with top 3 winners on each getting paid coins and a chance at VIP\n\n"
+                "-# All three leaderboards also post automatically every  Friday at 11:00 AM UTC, with top 3 winners on each getting paid coins and a chance at VIP\n\n"
                 "**Daily Reward**\n"
                 "-# Send at least one message each day to become eligible. Once eligible, the bot will ping you in the daily reward channel with a claim button.\n"
                 "-# Claiming builds a streak — the longer your streak, the bigger the reward (up to a cap)."
@@ -2136,6 +2136,7 @@ class HelpView(View):
                 "🔸`/ctriggerdaily @user`\n-# Manually send a daily reward ping to a specific user\n"
                 "🔸`/ctestdailyping`\n-# Manually send yourself a daily reward ping\n"
                 "🔸`/ctestleaderboardpost`\n-# Manually trigger all 3 weekly leaderboard posts, payouts, and VIP assignment"
+                "🔸`/cresetjobcooldowns @user`\n-# Reset all of a user's job cooldowns, letting them work every job again, immediately"
             )
         ]
 
