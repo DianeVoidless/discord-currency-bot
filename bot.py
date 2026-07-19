@@ -1998,6 +1998,8 @@ class HelpView(View):
                 "🔸`/csexsell @user`\n-# Offer your services, you get paid based on your body count\n"
                 "🔸`/cend`\n-# End your session and update everyone's stats\n"
                 "🔸`/cinterrupt`\n-# Leave the session without updating stats"
+                "**Others**\n"
+                "🔸`/cpsst @user [message]`\n-# Send a private whisper only they can see"
             ),
             (
                 "📖 Transactions",
@@ -2093,6 +2095,40 @@ async def cendall(interaction: discord.Interaction):
     active_sessions.clear()
 
     await interaction.response.send_message(f"✅ Force closed {count} active session(s). No stats were updated.")
+
+class WhisperView(View):
+    def __init__(self, sender_id: int, target_id: int, message: str):
+        super().__init__(timeout=None)  # stays clickable indefinitely, no expiry
+        self.sender_id = sender_id
+        self.target_id = target_id
+        self.message = message
+
+    @discord.ui.button(label="Reveal Whisper", style=discord.ButtonStyle.primary, emoji="🤫")
+    async def reveal(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.target_id:
+            await interaction.response.send_message("This whisper isn't for you!", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"🤫 Whisper from <@{self.sender_id}>:\n\n-# {self.message}",
+            ephemeral=True
+        )
+
+@bot.tree.command(name="cpsst", description="Send a private whisper to someone, visible only to them")
+@app_commands.describe(user="Who to whisper to", message="Your private message")
+async def cpsst(interaction: discord.Interaction, user: discord.Member, message: str):
+    if user.id == interaction.user.id:
+        await interaction.response.send_message("You can't whisper to yourself!", ephemeral=True)
+        return
+    if user.bot:
+        await interaction.response.send_message("You can't whisper to a bot!", ephemeral=True)
+        return
+
+    view = WhisperView(interaction.user.id, user.id, message)
+    await interaction.response.send_message(
+        f"🤫 {user.mention}, {interaction.user.mention} sent you a whisper — click below to read it.",
+        view=view
+    )
 
 @bot.tree.command(name="csessionoverview", description="Show all ongoing sessions with members, start time, and AFK check history (Mod/Owner only)")
 async def csessionoverview(interaction: discord.Interaction):
