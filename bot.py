@@ -2339,7 +2339,8 @@ class PerkBuyView(View):
                 "allure_boost_sessions_left": perk["sessions"]
             })
 
-        await log_transaction(f"🛍️ Perk Purchase: <@{interaction.user.id}> bought **{perk['label']}** for {perk['price']} 🪙", interaction.guild_id)
+        display_label = "Virginity Perk" if perk["label"] == "Buy" else perk["label"]
+        await log_transaction(f"🛍️ Perk Purchase: <@{interaction.user.id}> bought **{display_label}** for {perk['price']} 🪙", interaction.guild_id)
         await interaction.response.send_message(f"✅ You bought **{perk['label']}**! Your stats have been updated.", ephemeral=True)
         
 @bot.tree.command(name="cpostperk", description="Post a perk to a channel (Mod/Owner only)")
