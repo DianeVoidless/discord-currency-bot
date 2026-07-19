@@ -61,6 +61,31 @@ async def on_ready():
 
     bot.add_dynamic_items(DailyClaimButton)
     print("Registered dynamic daily claim button")
+    
+    reschedule_count = 0
+    for doc in db.collection("users").stream():
+        data = doc.to_dict()
+        job_cooldowns = data.get("job_cooldowns", {})
+        if not job_cooldowns:
+            continue
+
+        user_id = int(doc.id)
+        for cooldown_key, last_claim in job_cooldowns.items():
+            parts = cooldown_key.rsplit("_", 1)
+            if len(parts) != 2:
+                continue
+            job_name, floor_name = parts
+            if job_name not in config.JOB_PAY_INFO:
+                continue
+
+            _, _, cooldown_seconds = config.JOB_PAY_INFO[job_name]
+            ready_at = last_claim + cooldown_seconds
+
+            if ready_at > time.time():
+                bot.loop.create_task(schedule_job_ready_dm(user_id, job_name, floor_name, ready_at))
+                reschedule_count += 1
+
+    print(f"Rescheduled {reschedule_count} pending job-ready DM(s)")
 
     try:
         guild1 = discord.Object(id=1367183962447024158) # velvet
@@ -925,6 +950,26 @@ def get_job_role_number(job_name):
             return role_number
     return None
 
+async def schedule_job_ready_dm(user_id: int, job_name: str, floor_name: str, ready_at: float):
+    delay = ready_at - time.time()
+    if delay > 0:
+        await asyncio.sleep(delay)
+
+    user = bot.get_user(user_id)
+    if not user:
+        try:
+            user = await bot.fetch_user(user_id)
+        except Exception as e:
+            print(f"[JOB DM ERROR] Couldn't fetch user {user_id}: {e}")
+            return
+
+    job_label = job_name.replace("_", " ").title()
+    floor_label = floor_name.replace("_", " ").title()
+    try:
+        await user.send(f"🪙 Your **{job_label}** job on the **{floor_label}** floor is ready again — go earn some coins!")
+    except Exception as e:
+        print(f"[JOB DM ERROR] Couldn't DM {user_id}: {e}")
+
 class JobButtonView(View):
     def __init__(self, floor_name):
         super().__init__(timeout=None)  # permanent, always usable
@@ -983,6 +1028,9 @@ class JobButtonView(View):
             "job_cooldowns": job_cooldowns
         })
         increment_coins_received(interaction.guild_id, interaction.user.id, reward)
+
+        ready_at = now + cooldown_seconds
+        bot.loop.create_task(schedule_job_ready_dm(interaction.user.id, job_name, self.floor_name, ready_at))
 
         job_label = job_name.replace("_", " ").title()
         await interaction.response.send_message(
@@ -1779,6 +1827,39 @@ async def cclearjoblockout(interaction: discord.Interaction, user: discord.Membe
         print(f"[JOB LOCKOUT CLEAR ERROR] {type(e).__name__}: {e}")
         await interaction.response.send_message(f"❌ Something went wrong: {e}", ephemeral=True)
 
+@bot.tree.command(name="cresetjobcooldowns", description="Reset all of a user's job cooldowns, letting them work every job again immediately (Mod/Owner only)")
+async def cresetjobcooldowns(interaction: discord.Interaction, user: discord.Member):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [r.name for r in interaction.user.roles]
+
+    if not any(r in user_roles for r in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    try:
+        user_data = get_or_create_user(user)
+        job_cooldowns = user_data.get("job_cooldowns", {})
+
+        for cooldown_key, last_claim in job_cooldowns.items():
+            parts = cooldown_key.rsplit("_", 1)
+            if len(parts) != 2:
+                continue
+            job_name, floor_name = parts
+            if job_name not in config.JOB_PAY_INFO:
+                continue
+
+            _, _, cooldown_seconds = config.JOB_PAY_INFO[job_name]
+            ready_at = last_claim + cooldown_seconds
+
+            if ready_at > time.time():
+                bot.loop.create_task(schedule_job_ready_dm(user.id, job_name, floor_name, time.time()))
+
+        db.collection("users").document(str(user.id)).update({"job_cooldowns": {}})
+        await interaction.response.send_message(f"✅ Cleared all job cooldowns for {user.mention}. They can work any job immediately.", ephemeral=True)
+    except Exception as e:
+        print(f"[JOB COOLDOWN RESET ERROR] {type(e).__name__}: {e}")
+        await interaction.response.send_message(f"❌ Something went wrong: {e}", ephemeral=True)
+
 @bot.tree.command(name="csetjobrole", description="Link a Discord role to one of the 4 Job Roles (Mod/Owner only)")
 @app_commands.describe(job_role_number="Which Job Role this is (1-4)", role="The Discord role to link")
 async def csetjobrole(interaction: discord.Interaction, job_role_number: int, role: discord.Role):
@@ -1997,7 +2078,7 @@ class HelpView(View):
                 "🔸`/csexbuy @user`\n-# Buy someone's services, they get paid based on their body count\n"
                 "🔸`/csexsell @user`\n-# Offer your services, you get paid based on your body count\n"
                 "🔸`/cend`\n-# End your session and update everyone's stats\n"
-                "🔸`/cinterrupt`\n-# Leave the session without updating stats"
+                "🔸`/cinterrupt`\n-# Leave the session without updating stats\n"
                 "**Others**\n"
                 "🔸`/cpsst @user [message]`\n-# Send a private whisper only they can see"
             ),
