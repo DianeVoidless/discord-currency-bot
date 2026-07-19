@@ -1033,6 +1033,7 @@ class JobButtonView(View):
         bot.loop.create_task(schedule_job_ready_dm(interaction.user.id, job_name, self.floor_name, ready_at))
 
         job_label = job_name.replace("_", " ").title()
+        await log_transaction(f"💼 Job: <@{interaction.user.id}> earned {reward} 🪙 working as a **{job_label}**", interaction.guild_id)
         await interaction.response.send_message(
             f"✅ You worked as a **{job_label}** and earned **{reward} 🪙**!",
             ephemeral=True
