@@ -985,6 +985,7 @@ class JobButtonView(View):
         increment_coins_received(interaction.guild_id, interaction.user.id, reward)
 
         job_label = job_name.replace("_", " ").title()
+        await log_transaction(f"💼 Job: <@{interaction.user.id}> earned {reward} 🪙 working as a **{job_label}**", interaction.guild_id)
         await interaction.response.send_message(
             f"✅ You worked as a **{job_label}** and earned **{reward} 🪙**!",
             ephemeral=True
