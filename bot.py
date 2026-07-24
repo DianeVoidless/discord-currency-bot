@@ -22,7 +22,7 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 # Firebase connection
-cred = credentials.Certificate("currency-bot-19258-firebase-adminsdk-fbsvc-74ead12719.json")
+cred = credentials.Certificate("currency-bot-19258-firebase-adminsdk-fbsvc-9a62e9f9ba.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
