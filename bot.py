@@ -14,11 +14,15 @@ from discord.ui import View, Button
 import asyncio
 
 
+import logging
+logging.basicConfig(level=logging.INFO)
+
+
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 
 # Firebase connection
-cred = credentials.Certificate("currency-bot-19258-firebase-adminsdk-fbsvc-e9b8a6f065.json")
+cred = credentials.Certificate("currency-bot-19258-firebase-adminsdk-fbsvc-74ead12719.json")
 firebase_admin.initialize_app(cred)
 db = firestore.client()
 
@@ -2179,6 +2183,26 @@ async def cendall(interaction: discord.Interaction):
 
     await interaction.response.send_message(f"✅ Force closed {count} active session(s). No stats were updated.")
 
+class WhisperModal(discord.ui.Modal, title="Write Your Whisper"):
+    message_input = discord.ui.TextInput(
+        label="Your private message",
+        style=discord.TextStyle.paragraph,
+        max_length=1000,
+        required=True
+    )
+
+    def __init__(self, target: discord.Member):
+        super().__init__()
+        self.target = target
+
+    async def on_submit(self, interaction: discord.Interaction):
+        view = WhisperView(interaction.user.id, self.target.id, self.message_input.value)
+        await interaction.channel.send(
+            f"🤫 {self.target.mention}, {interaction.user.mention} sent you a whisper — click below to read it.",
+            view=view
+        )
+        await interaction.response.send_message("✅ Whisper sent!", ephemeral=True)
+
 class WhisperView(View):
     def __init__(self, sender_id: int, target_id: int, message: str):
         super().__init__(timeout=None)  # stays clickable indefinitely, no expiry
@@ -2198,8 +2222,8 @@ class WhisperView(View):
         )
 
 @bot.tree.command(name="cpsst", description="Send a private whisper to someone, visible only to them")
-@app_commands.describe(user="Who to whisper to", message="Your private message")
-async def cpsst(interaction: discord.Interaction, user: discord.Member, message: str):
+@app_commands.describe(user="Who to whisper to")
+async def cpsst(interaction: discord.Interaction, user: discord.Member):
     if user.id == interaction.user.id:
         await interaction.response.send_message("You can't whisper to yourself!", ephemeral=True)
         return
@@ -2207,11 +2231,7 @@ async def cpsst(interaction: discord.Interaction, user: discord.Member, message:
         await interaction.response.send_message("You can't whisper to a bot!", ephemeral=True)
         return
 
-    view = WhisperView(interaction.user.id, user.id, message)
-    await interaction.response.send_message(
-        f"🤫 {user.mention}, {interaction.user.mention} sent you a whisper — click below to read it.",
-        view=view
-    )
+    await interaction.response.send_modal(WhisperModal(user))
 
 @bot.tree.command(name="csessionoverview", description="Show all ongoing sessions with members, start time, and AFK check history (Mod/Owner only)")
 async def csessionoverview(interaction: discord.Interaction):
