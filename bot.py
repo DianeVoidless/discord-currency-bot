@@ -202,6 +202,9 @@ def calculate_session_price(body_count: int, multiplier: float = None) -> int:
         base_price = round(base_price * (1 + multiplier))
     return base_price
 
+def format_balance(amount: int) -> str:
+    return f"{amount:,}".replace(",", " ")
+
 def get_setting(key, default):
     ref = db.collection("settings").document(key)
     doc = ref.get()
@@ -1067,7 +1070,7 @@ async def profile(interaction: discord.Interaction):
     user = get_or_create_user(interaction.user)
     await interaction.response.send_message(
         f"**{interaction.user.name}'s Profile**\n"
-        f"💰 Balance: {user['balance']} 🪙\n"
+        f"💰 Balance: {format_balance(user['balance'])} 🪙\n"
         f"🌸 Status: {user['status']}\n"
         f"🔢 Body Count: {user['body_count']}\n"
         f"🏠 House: {user['house'] or 'None'}"
@@ -1084,7 +1087,7 @@ async def cview(interaction: discord.Interaction, user: discord.Member):
     profile = get_or_create_user(user)
     await interaction.response.send_message(
         f"**{user.name}'s Profile**\n"
-        f"💰 Balance: {profile['balance']} 🪙\n"
+        f"💰 Balance: {format_balance(profile['balance'])} 🪙\n"
         f"🌸 Status: {profile['status']}\n"
         f"🔢 Body Count: {profile['body_count']}\n"
         f"🏠 House: {profile['house'] or 'None'}"
