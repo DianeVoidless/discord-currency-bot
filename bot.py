@@ -2492,6 +2492,7 @@ class HelpView(View):
                 "🔸`/cedit @user [field] [value]`\n-# Edit a user's profile\n"
                 "🔸`/creset @user`\n-# Reset a user's stats\n"
                 "🔸`/cendall`\n-# Force close all active sessions\n"
+                "🔸`/cinterruptall`\n-# Force close all active sessions without updating stats and initiating refunds for everyone\n"
                 "🔸`/csetlogchannel #channel`\n-# Set the transaction log channel\n"
                 "🔸`/csetannouncechannel #channel`\n-# Set the bot status announcement channel\n"
                 "🔸`/csetleaderboardchannel #channel`\n-# Set the channel for the automatic weekly leaderboards\n"
@@ -2554,6 +2555,45 @@ async def cendall(interaction: discord.Interaction):
     active_sessions.clear()
 
     await interaction.response.send_message(f"✅ Force closed {count} active session(s). No stats were updated.")
+
+@bot.tree.command(name="cinterruptall", description="Force close all active sessions and refund payments, without updating stats (Mod/Owner only)")
+async def cinterruptall(interaction: discord.Interaction):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if not sessions:
+        await interaction.response.send_message("There are no active sessions!", ephemeral=True)
+        return
+
+    await interaction.response.defer()
+
+    count = len(sessions)
+
+    for session_id, session_data in list(sessions.items()):
+        payer_id = session_data.get("payer_id")
+        payee_id = session_data.get("payee_id")
+        price = session_data.get("price")
+
+        if payer_id and payee_id and price:
+            payer_ref = db.collection("users").document(str(payer_id))
+            payee_ref = db.collection("users").document(str(payee_id))
+            payer_data = payer_ref.get().to_dict()
+            payee_data = payee_ref.get().to_dict()
+
+            if payer_data and payee_data:
+                payer_ref.update({"balance": payer_data["balance"] + price})
+                payee_ref.update({"balance": payee_data["balance"] - price})
+
+                await log_transaction(f"↩️ Refund: <@{payee_id}> refunded {price} 🪙 to <@{payer_id}> (session force-interrupted)", interaction.guild_id)
+
+    sessions.clear()
+    active_sessions.clear()
+
+    await interaction.followup.send(f"⛔ Force closed {count} active session(s). No stats were updated, payments refunded.")
 
 class WhisperModal(discord.ui.Modal, title="Write Your Whisper"):
     message_input = discord.ui.TextInput(
