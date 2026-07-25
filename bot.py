@@ -2475,45 +2475,7 @@ class HelpView(View):
                 "-# Pick a Job Role on the job select board — you can only hold one at a time. Each role gives you access to a few specific jobs.\n"
                 "-# Job buttons are posted in each floor's job channel. You must hold the matching Job Role to work a job button.\n"
                 "-# Each job button pays out a random amount and goes on its own cooldown — the same job on different floors has separate cooldowns.\n"
-                "-# Quitting your Job Role is instant and free, but locks you out of joining a new one for 2 days.\n\n"
-                "**Mod/Owner Only**\n"
-                "🔸`/csetjobrole [1-4] @role`\n-# Link a Discord role to one of the 4 Job Roles\n"
-                "🔸`/cpostjobselect #channel`\n-# Post the job role select board\n"
-                "🔸`/cpostjobboard [floor] #channel`\n-# Post job buttons for a specific floor\n"
-                "🔸`/cclearjoblockout @user`\n-# Clear a user's job-quit lockout early"
-            ),
-            (
-                "📖 Mod/Owner/Trial Mod Only",
-                "🔸`/cwarn @user [category] [extra info]`\n-# Issue an informal warning (no strike count impact)\n"
-                "🔸`/cstrike @user [category] [extra info]`\n-# Add a strike to a user\n"
-                "🔸`/ctimeout @user [category] [duration] [extra info]`\n-# Timeout a user\n"
-                "🔸`/cmodhistory @user`\n-# View a user's full moderation history (strikes, warns, timeouts, kicks, bans)\n\n\n"
-                "📖 **Mod/Owner Only**\n\n"
-                "🔸`/cedit @user [field] [value]`\n-# Edit a user's profile\n"
-                "🔸`/creset @user`\n-# Reset a user's stats\n"
-                "🔸`/cendall`\n-# Force close all active sessions\n"
-                "🔸`/cinterruptall`\n-# Force close all active sessions without updating stats and initiating refunds for everyone\n"
-                "🔸`/csetlogchannel #channel`\n-# Set the transaction log channel\n"
-                "🔸`/csetannouncechannel #channel`\n-# Set the bot status announcement channel\n"
-                "🔸`/csetleaderboardchannel #channel`\n-# Set the channel for the automatic weekly leaderboards\n"
-                "🔸`/csetdailychannel #channel`\n-# Set the channel for daily reward claim pings\n"
-                "🔸`/csetviprole @role`\n-# Set the role granted to weekly leaderboard winners\n"
-                "🔸`/csetstrikelogchannel #channel`\n-# Set the strike log channel\n"
-                "🔸`/csetreactionrole [message_id] [emoji] [role]`\n-# Set up a reaction role\n"
-                "🔸`/cfixprofiles`\n-# Backfill any missing fields on incomplete user profiles\n"
-                "🔸`/cpostperk [perk] #channel`\n-# Post a perk (Virginity Reset or Allure Boost) to a channel\n"
-                "🔸`/csessionoverview`\n-# Show all ongoing sessions with members, start time, and AFK check history\n"
-                "🔸`/ckick @user [category] [extra info]`\n-# Kick a user from the server\n"
-                "🔸`/cban @user [category] [extra info]`\n-# Ban a user from the server\n"
-                "🔸`/cremoveaction @user`\n-# Remove a strike, warn, timeout, or ban from a user\n"
-            ),
-            (
-                "📖 Trigger / Test Commands (Mod/Owner only)",
-                "-# These manually trigger things that would normally happen automatically — useful for testing or forcing an early run.\n\n"
-                "🔸`/ctriggerdaily @user`\n-# Manually send a daily reward ping to a specific user\n"
-                "🔸`/ctestdailyping`\n-# Manually send yourself a daily reward ping\n"
-                "🔸`/ctestleaderboardpost`\n-# Manually trigger all 3 weekly leaderboard posts, payouts, and VIP assignment"
-                "🔸`/cresetjobcooldowns @user`\n-# Reset all of a user's job cooldowns, letting them work every job again, immediately"
+                "-# Quitting your Job Role is instant and free, but locks you out of joining a new one for 2 days."
             )
         ]
 
@@ -2531,10 +2493,89 @@ class HelpView(View):
         self.page = (self.page + 1) % len(self.pages)
         await interaction.response.edit_message(content=self.get_embed_content(), view=self)
 
+class HelpModView(View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.page = 0
+        self.pages = [
+            (
+                "📖 Server Management (Mod/Owner/Trial Mod Only)",
+                "🔸`/cwarn @user [category] [extra info]`\n-# Issue an informal warning (no strike count impact)\n"
+                "🔸`/cstrike @user [category] [extra info]`\n-# Add a strike to a user\n"
+                "🔸`/ctimeout @user [category] [duration] [extra info]`\n-# Timeout a user\n"
+                "🔸`/cmodhistory @user`\n-# View a user's full moderation history (strikes, warns, timeouts, kicks, bans)\n\n"
+                "📖 **Server Management (Mod/Owner)** \n"
+                "🔸`/ckick @user [category] [extra info]`\n-# Kick a user from the server\n"
+                "🔸`/cban @user [category] [extra info]`\n-# Ban a user from the server\n"
+                "🔸`/cremoveaction @user`\n-# Remove a strike, warn, timeout, or ban from a user"
+            ),
+            (
+                "📖 Server Setup (Mod/Owner)",
+                "🔸`/csetlogchannel #channel`\n-# Set the transaction log channel\n"
+                "🔸`/csetannouncechannel #channel`\n-# Set the bot status announcement channel\n"
+                "🔸`/csetleaderboardchannel #channel`\n-# Set the channel for the automatic weekly leaderboards\n"
+                "🔸`/csetdailychannel #channel`\n-# Set the channel for daily reward claim pings\n"
+                "🔸`/csetviprole @role`\n-# Set the role granted to weekly leaderboard winners\n"
+                "🔸`/csetstrikelogchannel #channel`\n-# Set the strike log channel\n"
+                "🔸`/csetreactionrole [message_id] [emoji] [role]`\n-# Set up a reaction role\n"
+                "🔸`/cpostperk [perk] #channel`\n-# Post a perk to a channel\n"
+            ),
+            (
+                "📖 User Stats Modification (Mod/Owner Only)",
+                "🔸`/cedit @user [field] [value]`\n-# Edit a user's profile\n"
+                "🔸`/creset @user`\n-# Reset a user's stats\n"
+                "🔸`/cfixprofiles`\n-# Backfill any missing fields on incomplete user profiles\n\n"
+                "📖 **Session Management (Mod/Owner)** \n"
+                "🔸`/cendall`\n-# Force close all active sessions\n"
+                "🔸`/cinterruptall`\n-# Force close all active sessions without updating stats and initiating refunds for everyone\n"
+                "🔸`/csessionoverview`\n-# Show all ongoing sessions with members, start time, and AFK check history"
+            ),
+            (
+                "📖 Job Setup (Mod/Owner Only)",
+                "🔸`/csetjobrole [1-4] @role`\n-# Link a Discord role to one of the 4 Job Roles\n"
+                "🔸`/cpostjobselect #channel`\n-# Post the job role select board\n"
+                "🔸`/cpostjobboard [floor] #channel`\n-# Post job buttons for a specific floor\n"
+                "🔸`/cclearjoblockout @user`\n-# Clear a user's job-quit lockout early\n"
+                "🔸`/cresetjobcooldowns @user`\n-# Reset all of a user's job cooldowns, letting them work every job again, immediately"
+            ),
+            (
+                "📖 Trigger / Test Commands (Mod/Owner only)",
+                "-# These manually trigger things that would normally happen automatically — useful for testing or forcing an early run.\n\n"
+                "🔸`/ctriggerdaily @user`\n-# Manually send a daily reward ping to a specific user\n"
+                "🔸`/ctestdailyping`\n-# Manually send yourself a daily reward ping\n"
+                "🔸`/ctestleaderboardpost`\n-# Manually trigger all 3 weekly leaderboard posts, payouts, and VIP assignment"
+            )
+        ]
+
+    def get_embed_content(self):
+        title, content = self.pages[self.page]
+        return f"**{title}** (Page {self.page + 1}/{len(self.pages)})\n\n{content}"
+
+    @discord.ui.button(label="◀ Previous", style=discord.ButtonStyle.gray)
+    async def previous(self, interaction: discord.Interaction, button: Button):
+        self.page = (self.page - 1) % len(self.pages)
+        await interaction.response.edit_message(content=self.get_embed_content(), view=self)
+
+    @discord.ui.button(label="Next ▶", style=discord.ButtonStyle.gray)
+    async def next(self, interaction: discord.Interaction, button: Button):
+        self.page = (self.page + 1) % len(self.pages)
+        await interaction.response.edit_message(content=self.get_embed_content(), view=self)
 
 @bot.tree.command(name="chelp", description="Show all available commands")
 async def chelp(interaction: discord.Interaction):
     view = HelpView()
+    await interaction.response.send_message(view.get_embed_content(), view=view, ephemeral=True)
+
+@bot.tree.command(name="chelpmod", description="Show all mod-only commands (Mod/Owner/Trial Mod only)")
+async def chelpmod(interaction: discord.Interaction):
+    allowed_roles = ["Mod", "Owner", "Trial Mod"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    view = HelpModView()
     await interaction.response.send_message(view.get_embed_content(), view=view, ephemeral=True)
 
 @bot.tree.command(name="cendall", description="Force close all active sessions (Mod/Owner only)")
