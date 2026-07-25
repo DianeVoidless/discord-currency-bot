@@ -1688,72 +1688,435 @@ async def creset(interaction: discord.Interaction, user: discord.Member):
     })
     await interaction.response.send_message(f"✅ {user.name}'s profile has been reset!")
 
-@bot.tree.command(name="cstrike", description="Add a strike to a user (Mod/Owner only)")
-async def cstrike(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
+@bot.tree.command(name="cmodhistory", description="Show a user's full moderation history (strikes, warns, timeouts, kicks, bans) (Mod/Owner only)")
+async def cmodhistory(interaction: discord.Interaction, user: discord.User):
+    allowed_roles = ["Mod", "Owner", "Trial Mod"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    user_data = get_or_create_user(user)
+    mod_history = user_data.get("moderation_history", [])
+
+    if not mod_history:
+        await interaction.response.send_message(f"{user.mention} has no moderation history.", ephemeral=True)
+        return
+
+    type_emojis = {"strike": "🔴", "warn": "📋", "timeout": "⏱️", "kick": "🚪", "ban": "⛔"}
+    lines = []
+    for i, record in enumerate(mod_history, start=1):
+        date_str = datetime.fromisoformat(record["date"]).strftime("%B %d, %Y at %H:%M")
+        record_type = record.get("type", "unknown")
+        emoji = type_emojis.get(record_type, "•")
+
+        extra_line = ""
+        if record_type == "timeout" and "duration_seconds" in record:
+            hours = record["duration_seconds"] // 3600
+            extra_line = f"\n-# Duration: {hours}h" if hours else f"\n-# Duration: {record['duration_seconds']}s"
+
+        lines.append(
+            f"**{i}.** {emoji} **{record_type.capitalize()}** — {date_str}\n"
+            f"-# Category: {record.get('category', 'N/A')}\n"
+            f"-# Details: {record.get('extra_info', 'N/A')}"
+            f"{extra_line}\n"
+            f"-# Issued by: <@{record.get('issued_by')}>"
+        )
+
+    full_text = f"**📁 Moderation History for {user.mention}** ({len(mod_history)} total)\n\n" + "\n\n".join(lines)
+
+    if len(full_text) > 1900:
+        await interaction.response.send_message("This user has too much history to display at once.", ephemeral=True)
+        return
+
+    await interaction.response.send_message(full_text, ephemeral=True)
+
+@bot.tree.command(name="cban", description="Ban a user from the server (Mod/Owner only)")
+@app_commands.describe(user="Who to ban", category="Which rule was broken", extra_info="Optional extra details")
+@app_commands.choices(category=[
+    app_commands.Choice(name="Confirmed/strongly evidenced underage presence", value="Confirmed or strongly evidenced underage presence"),
+    app_commands.Choice(name="Bigotry (racism, sexism, homophobia, etc.)", value="Bigotry — racism, sexism, homophobia, targeted hate speech"),
+    app_commands.Choice(name="Deliberate repeated real-life NSFW sharing", value="Deliberate, repeated sharing of real-life NSFW images or videos after being told to stop"),
+    app_commands.Choice(name="Harassment / threats / doxxing", value="Harassment that continues after being told to stop, or involves threats/doxxing/targeted abuse"),
+    app_commands.Choice(name="Predatory behavior", value="Predatory behavior directed at any member"),
+    app_commands.Choice(name="Alt account evading a previous ban", value="Alt account evading a previous ban"),
+    app_commands.Choice(name="Severe repeated consent violations (godmodding)", value="Severe, repeated consent violations (godmodding) after a prior kick"),
+])
+async def cban(interaction: discord.Interaction, user: discord.User, category: app_commands.Choice[str], extra_info: str = "No additional details provided"):
     allowed_roles = ["Mod", "Owner"]
     user_roles = [role.name for role in interaction.user.roles]
 
     if not any(role in user_roles for role in allowed_roles):
         await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
         return
-    
+
+    if not get_setting(f"strike_log_channel_id_{interaction.guild_id}", None):
+        await interaction.response.send_message("❌ Moderation logging is disabled until a strike log channel is set!", ephemeral=True)
+        return
+
+    user_data = get_or_create_user(user)
+    mod_history = user_data.get("moderation_history", [])
+
+    mod_history.append({
+        "type": "ban",
+        "date": datetime.now(ZoneInfo("Europe/Bucharest")).isoformat(),
+        "category": category.name,
+        "extra_info": extra_info,
+        "issued_by": interaction.user.id
+    })
+    db.collection("users").document(str(user.id)).update({"moderation_history": mod_history})
+
+    try:
+        await user.send(
+            f"⛔ You've been banned from **{interaction.guild.name}**.\n\n"
+            f"**Reason:** {category.name}\n"
+            f"**Details:** {extra_info}"
+        )
+    except Exception as e:
+        print(f"[BAN DM ERROR] Couldn't DM {user.id}: {e}")
+
+    try:
+        await interaction.guild.ban(user, reason=f"{category.name} — {extra_info}")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Couldn't ban this user: {e}", ephemeral=True)
+        return
+
+    await log_strike(
+        f"⛔ **User Banned**\nUser: {user.mention} ({user.id})\nIssued by: {interaction.user.mention}\nCategory: {category.name}\nExtra Info: {extra_info}",
+        interaction.guild_id
+    )
+
+    await interaction.response.send_message(f"⛔ {user.mention} has been banned. Reason: **{category.name}**.")
+
+@bot.tree.command(name="ckick", description="Kick a user from the server (Mod/Owner only)")
+@app_commands.describe(user="Who to kick", category="Which rule was broken", extra_info="Optional extra details")
+@app_commands.choices(category=[
+    app_commands.Choice(name="Third violation within 30 days", value="Third rule violation within 30 days after prior warnings/strikes"),
+    app_commands.Choice(name="Persistent minor rule-breaking", value="Persistent minor rule-breaking after multiple timeouts (carelessness pattern)"),
+])
+async def ckick(interaction: discord.Interaction, user: discord.Member, category: app_commands.Choice[str], extra_info: str = "No additional details provided"):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if not get_setting(f"strike_log_channel_id_{interaction.guild_id}", None):
+        await interaction.response.send_message("❌ Moderation logging is disabled until a strike log channel is set!", ephemeral=True)
+        return
+
+    user_data = get_or_create_user(user)
+    mod_history = user_data.get("moderation_history", [])
+
+    mod_history.append({
+        "type": "kick",
+        "date": datetime.now(ZoneInfo("Europe/Bucharest")).isoformat(),
+        "category": category.name,
+        "extra_info": extra_info,
+        "issued_by": interaction.user.id
+    })
+    db.collection("users").document(str(user.id)).update({"moderation_history": mod_history})
+
+    try:
+        await user.send(
+            f"🚪 You've been kicked from **{interaction.guild.name}**.\n\n"
+            f"**Reason:** {category.name}\n"
+            f"**Details:** {extra_info}\n\n"
+            f"You're welcome to rejoin and re-verify."
+        )
+    except Exception as e:
+        print(f"[KICK DM ERROR] Couldn't DM {user.id}: {e}")
+
+    try:
+        await user.kick(reason=f"{category.name} — {extra_info}")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Couldn't kick this user: {e}", ephemeral=True)
+        return
+
+    await log_strike(
+        f"🚪 **User Kicked**\nUser: {user.mention} ({user.id})\nIssued by: {interaction.user.mention}\nCategory: {category.name}\nExtra Info: {extra_info}",
+        interaction.guild_id
+    )
+
+    await interaction.response.send_message(f"🚪 {user.mention} has been kicked. Reason: **{category.name}**.")
+
+
+
+@bot.tree.command(name="ctimeout", description="Timeout a user (Mod/Owner/Trial Mod only)")
+@app_commands.describe(user="Who to timeout", category="Which rule was broken", duration="How long", extra_info="Optional extra details")
+@app_commands.choices(
+    category=[
+        app_commands.Choice(name="Repeating a warned/struck behavior", value="Repeating a warned or single-struck behavior again shortly after"),
+        app_commands.Choice(name="Escalating into personal attacks", value="Escalating an argument into personal attacks (short of slurs/targeted harassment)"),
+        app_commands.Choice(name="Second real-life NSFW incident / pushback", value="A second real-life-NSFW-content incident, or pushing back instead of complying"),
+    ],
+    duration=[
+        app_commands.Choice(name="10 minutes", value=600),
+        app_commands.Choice(name="1 hour", value=3600),
+        app_commands.Choice(name="6 hours", value=21600),
+        app_commands.Choice(name="12 hours", value=43200),
+        app_commands.Choice(name="1 day", value=86400),
+        app_commands.Choice(name="3 days", value=259200),
+        app_commands.Choice(name="7 days", value=604800),
+    ]
+)
+async def ctimeout(interaction: discord.Interaction, user: discord.Member, category: app_commands.Choice[str], duration: app_commands.Choice[int], extra_info: str = "No additional details provided"):
+    allowed_roles = ["Mod", "Owner", "Trial Mod"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if not get_setting(f"strike_log_channel_id_{interaction.guild_id}", None):
+        await interaction.response.send_message("❌ Moderation logging is disabled until a strike log channel is set!", ephemeral=True)
+        return
+
+    try:
+        await user.timeout(timedelta(seconds=duration.value), reason=f"{category.name} — {extra_info}")
+    except Exception as e:
+        await interaction.response.send_message(f"❌ Couldn't timeout this user: {e}", ephemeral=True)
+        return
+
+    user_data = get_or_create_user(user)
+    mod_history = user_data.get("moderation_history", [])
+
+    mod_history.append({
+        "type": "timeout",
+        "date": datetime.now(ZoneInfo("Europe/Bucharest")).isoformat(),
+        "category": category.name,
+        "duration_seconds": duration.value,
+        "extra_info": extra_info,
+        "issued_by": interaction.user.id
+    })
+
+    db.collection("users").document(str(user.id)).update({"moderation_history": mod_history})
+
+    await log_strike(
+        f"⏱️ **Timeout Issued**\nUser: {user.mention}\nDuration: {duration.name}\nIssued by: {interaction.user.mention}\nCategory: {category.name}\nExtra Info: {extra_info}",
+        interaction.guild_id
+    )
+
+    await interaction.response.send_message(f"⏱️ {user.mention} has been timed out for **{duration.name}**. Reason: **{category.name}**.")
+
+    try:
+        await user.send(
+            f"⏱️ You've been timed out in **{interaction.guild.name}** for **{duration.name}**.\n\n"
+            f"**Reason:** {category.name}\n"
+            f"**Details:** {extra_info}"
+        )
+    except Exception as e:
+        print(f"[TIMEOUT DM ERROR] Couldn't DM {user.id}: {e}")
+
+class RemoveActionView(View):
+    def __init__(self, target: discord.User, full_history: list, moderator: discord.Member, guild: discord.Guild):
+        super().__init__(timeout=config.CONFIRMATION_TIMEOUT)
+        self.target = target
+        self.full_history = full_history
+        self.moderator = moderator
+        self.guild = guild
+
+        options = []
+        for i, record in enumerate(full_history):
+            if record.get("type") not in ("strike", "warn", "timeout", "ban"):
+                continue
+            date_str = datetime.fromisoformat(record["date"]).strftime("%b %d, %Y")
+            type_label = record["type"].capitalize()
+            label = f"{type_label} — {date_str} — {record['category'][:50]}"
+            options.append(discord.SelectOption(label=label[:100], value=str(i)))
+
+        if not options:
+            options.append(discord.SelectOption(label="No removable actions found", value="none"))
+
+        select = discord.ui.Select(placeholder="Choose an action to remove...", options=options[:25])
+        select.callback = self.on_select
+        self.add_item(select)
+
+    async def on_select(self, interaction: discord.Interaction):
+        selected = interaction.data["values"][0]
+        if selected == "none":
+            await interaction.response.send_message("Nothing to remove.", ephemeral=True)
+            return
+
+        index = int(selected)
+        removed_record = self.full_history.pop(index)
+        record_type = removed_record.get("type")
+
+        user_data = get_or_create_user(self.target)
+        new_strikes = user_data.get("strikes", 0)
+
+        if record_type == "strike":
+            new_strikes = max(0, new_strikes - 1)
+
+        elif record_type == "timeout":
+            member = self.guild.get_member(self.target.id)
+            if member:
+                try:
+                    await member.timeout(None, reason=f"Timeout ended early by {self.moderator}")
+                except Exception as e:
+                    print(f"[REMOVE ACTION ERROR] Couldn't end timeout for {self.target.id}: {e}")
+
+        elif record_type == "ban":
+            try:
+                await self.guild.unban(self.target, reason=f"Unbanned by {self.moderator}")
+            except Exception as e:
+                print(f"[REMOVE ACTION ERROR] Couldn't unban {self.target.id}: {e}")
+
+        db.collection("users").document(str(self.target.id)).update({
+            "strikes": new_strikes,
+            "moderation_history": self.full_history
+        })
+
+        await log_strike(
+            f"✅ **Moderation Action Removed**\nUser: {self.target.mention}\nType: {record_type.capitalize()}\nRemoved by: {self.moderator.mention}\nOriginal Category: {removed_record['category']}",
+            interaction.guild_id
+        )
+
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content=f"✅ Removed {record_type}: **{removed_record['category']}** ({datetime.fromisoformat(removed_record['date']).strftime('%b %d, %Y')}).",
+            view=self
+        )
+
+        await interaction.channel.send(f"✅ A moderation action ({record_type}) has been removed for {self.target.mention}.")
+
+@bot.tree.command(name="cremoveaction", description="Remove a strike, warn, timeout, or ban from a user (Mod/Owner only)")
+async def cremoveaction(interaction: discord.Interaction, user: discord.User):
+    allowed_roles = ["Mod", "Owner"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if not get_setting(f"strike_log_channel_id_{interaction.guild_id}", None):
+        await interaction.response.send_message("❌ Moderation logging is disabled until a strike log channel is set!", ephemeral=True)
+        return
+
+    user_data = get_or_create_user(user)
+    full_history = user_data.get("moderation_history", [])
+
+    removable = [r for r in full_history if r.get("type") in ("strike", "warn", "timeout", "ban")]
+    if not removable:
+        await interaction.response.send_message(f"{user.mention} has no removable moderation actions.", ephemeral=True)
+        return
+
+    view = RemoveActionView(user, full_history, interaction.user, interaction.guild)
+    await interaction.response.send_message(
+        f"Select which action to remove for {user.mention}:",
+        view=view,
+        ephemeral=True
+    )
+
+@bot.tree.command(name="cwarn", description="Issue a warning to a user (Mod/Owner only)")
+@app_commands.describe(user="Who to warn", category="Which rule was broken", extra_info="Optional extra details")
+@app_commands.choices(category=[
+    app_commands.Choice(name="Forgetting (( )) for OOC speech", value="Forgetting (( )) for OOC speech"),
+    app_commands.Choice(name="Borderline images/videos in an SFW channel", value="Accidentally posting borderline images/videos in an SFW channel"),
+    app_commands.Choice(name="Mild godmodding (misunderstanding)", value="Mild godmodding that looks like a misunderstanding, not defiance"),
+    app_commands.Choice(name="Argumentative/disruptive behavior", value="Being argumentative/disruptive without crossing into harassment"),
+    app_commands.Choice(name="Ghosting a session partner (first instance)", value="Ghosting a session partner instead of using /cend or /cinterrupt"),
+])
+async def cwarn(interaction: discord.Interaction, user: discord.Member, category: app_commands.Choice[str], extra_info: str = "No additional details provided"):
+    allowed_roles = ["Mod", "Owner", "Trial Mod"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
+    if not get_setting(f"strike_log_channel_id_{interaction.guild_id}", None):
+        await interaction.response.send_message("❌ Moderation logging is disabled until a strike log channel is set!", ephemeral=True)
+        return
+
+    user_data = get_or_create_user(user)
+    mod_history = user_data.get("moderation_history", [])
+
+    mod_history.append({
+        "type": "warn",
+        "date": datetime.now(ZoneInfo("Europe/Bucharest")).isoformat(),
+        "category": category.name,
+        "extra_info": extra_info,
+        "issued_by": interaction.user.id
+    })
+
+    db.collection("users").document(str(user.id)).update({"moderation_history": mod_history})
+
+    await log_strike(
+        f"📋 **Warning Issued**\nUser: {user.mention}\nIssued by: {interaction.user.mention}\nCategory: {category.name}\nExtra Info: {extra_info}",
+        interaction.guild_id
+    )
+
+    await interaction.response.send_message(f"📋 {user.mention} has received a warning. Reason: **{category.name}**.")
+
+    try:
+        await user.send(
+            f"📋 You've received a warning in **{interaction.guild.name}**.\n\n"
+            f"**Reason:** {category.name}\n"
+            f"**Details:** {extra_info}\n\n"
+            f"This is informal and doesn't count as a strike, but please review the server rules."
+        )
+    except Exception as e:
+        print(f"[WARN DM ERROR] Couldn't DM {user.id}: {e}")
+
+@bot.tree.command(name="cstrike", description="Add a strike to a user (Mod/Owner only)")
+@app_commands.describe(user="Who to strike", category="Which rule was broken", extra_info="Optional extra details")
+@app_commands.choices(category=[
+    app_commands.Choice(name="Harassment / disrespecting boundaries", value="Harassment or disrespecting someone's boundaries after they've said no"),
+    app_commands.Choice(name="NSFW roleplay without an active session", value="NSFW roleplay happening without both parties in an active session"),
+    app_commands.Choice(name="OOC/IC not separated (repeated)", value="Consistently not separating OOC/IC despite being told"),
+    app_commands.Choice(name="Deliberate godmodding", value="Deliberate godmodding after being asked to stop"),
+    app_commands.Choice(name="Real-life NSFW content (first instance)", value="Sharing/discussing real-life NSFW content, appears to be a misunderstanding"),
+])
+async def cstrike(interaction: discord.Interaction, user: discord.Member, category: app_commands.Choice[str], extra_info: str = "No additional details provided"):
+    allowed_roles = ["Mod", "Owner", "Trial Mod"]
+    user_roles = [role.name for role in interaction.user.roles]
+
+    if not any(role in user_roles for role in allowed_roles):
+        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
+        return
+
     if not get_setting(f"strike_log_channel_id_{interaction.guild_id}", None):
         await interaction.response.send_message("❌ Strikes are disabled until a strike log channel is set!", ephemeral=True)
         return
 
     user_data = get_or_create_user(user)
     new_strikes = user_data.get("strikes", 0) + 1
+    mod_history = user_data.get("moderation_history", [])
 
-    db.collection("users").document(str(user.id)).update({"strikes": new_strikes})
+    strike_record = {
+        "type": "strike",
+        "date": datetime.now(ZoneInfo("Europe/Bucharest")).isoformat(),
+        "category": category.name,
+        "extra_info": extra_info,
+        "issued_by": interaction.user.id
+    }
+    mod_history.append(strike_record)
 
-    await log_strike(f"⚠️ **Strike Added**\nUser: {user.mention}\nNew Strike Count: {new_strikes}\nIssued by: {interaction.user.mention}\nReason: {reason}", interaction.guild_id)
-    await interaction.response.send_message(f"⚠️ {user.mention} now has **{new_strikes} strike(s)**.", ephemeral=True)
+    db.collection("users").document(str(user.id)).update({
+        "strikes": new_strikes,
+        "moderation_history": mod_history
+    })
 
-@bot.tree.command(name="cunstrike", description="Remove a strike from a user (Mod/Owner only)")
-async def cunstrike(interaction: discord.Interaction, user: discord.Member, reason: str = "No reason provided"):
-    allowed_roles = ["Mod", "Owner"]
-    user_roles = [role.name for role in interaction.user.roles]
-
-    if not any(role in user_roles for role in allowed_roles):
-        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-        return
-    
-    if not get_setting(f"strike_log_channel_id_{interaction.guild_id}", None):
-        await interaction.response.send_message("❌ Strikes are disabled until a strike log channel is set!", ephemeral=True)
-        return
-
-    user_data = get_or_create_user(user)
-    current_strikes = user_data.get("strikes", 0)
-
-    if current_strikes <= 0:
-        await interaction.response.send_message(f"{user.mention} has no strikes to remove!", ephemeral=True)
-        return
-
-    new_strikes = current_strikes - 1
-    db.collection("users").document(str(user.id)).update({"strikes": new_strikes})
-
-    await log_strike(f"✅ **Strike Removed**\nUser: {user.mention}\nNew Strike Count: {new_strikes}\nIssued by: {interaction.user.mention}\nReason: {reason}", interaction.guild_id)
-    await interaction.response.send_message(f"✅ Removed a strike from {user.mention}. They now have **{new_strikes} strike(s)**.", ephemeral=True)
-
-@bot.tree.command(name="cmodview", description="View a user's full profile including strikes (Mod/Owner only)")
-async def cmodview(interaction: discord.Interaction, user: discord.Member):
-    allowed_roles = ["Mod", "Owner"]
-    user_roles = [role.name for role in interaction.user.roles]
-
-    if not any(role in user_roles for role in allowed_roles):
-        await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
-        return
-
-    user_data = get_or_create_user(user)
-    await interaction.response.send_message(
-        f"**{user.name}'s Full Profile** 🔍\n"
-        f"💰 Balance: {user_data['balance']} 🪙\n"
-        f"🌸 Status: {user_data['status']}\n"
-        f"🔢 Body Count: {user_data['body_count']}\n"
-        f"🏠 House: {user_data['house'] or 'None'}\n"
-        f"⚠️ Strikes: {user_data.get('strikes', 0)}",
-        ephemeral=True
+    await log_strike(
+        f"⚠️ **Strike Added**\nUser: {user.mention}\nNew Strike Count: {new_strikes}\nIssued by: {interaction.user.mention}\nCategory: {category.name}\nExtra Info: {extra_info}",
+        interaction.guild_id
     )
+
+    await interaction.response.send_message(f"⚠️ {user.mention} has received a strike. Reason: **{category.name}**. They now have **{new_strikes} strike(s)**.")
+
+    try:
+        await user.send(
+            f"⚠️ You've received a strike in **{interaction.guild.name}**.\n\n"
+            f"**Reason:** {category.name}\n"
+            f"**Details:** {extra_info}\n\n"
+            f"You now have **{new_strikes} strike(s)**. Please review the server rules to avoid further action."
+        )
+    except Exception as e:
+        print(f"[STRIKE DM ERROR] Couldn't DM {user.id}: {e}")
 
 @bot.tree.command(name="csetlogchannel", description="Set the channel for transaction logs (Mod/Owner only)")
 async def csetlogchannel(interaction: discord.Interaction, channel: discord.TextChannel):
@@ -2052,6 +2415,7 @@ async def cfixprofiles(interaction: discord.Interaction):
         "house": STARTING_HOUSE,
         "partners": [],
         "strikes": 0,
+        "moderation_history": [],
         "allure_boost_multiplier": None,
         "allure_boost_sessions_left": 0
     }
@@ -2085,7 +2449,7 @@ class HelpView(View):
                 "🔸`/cend`\n-# End your session and update everyone's stats\n"
                 "🔸`/cinterrupt`\n-# Leave the session without updating stats\n"
                 "**Others**\n"
-                "🔸`/cpsst @user [message]`\n-# Send a private whisper only they can see"
+                "🔸`/cpsst @user`\n-# Send a private whisper only they can see"
             ),
             (
                 "📖 Transactions",
@@ -2116,7 +2480,12 @@ class HelpView(View):
                 "🔸`/cclearjoblockout @user`\n-# Clear a user's job-quit lockout early"
             ),
             (
-                "📖 Mod/Owner Only",
+                "📖 Mod/Owner/Trial Mod Only",
+                "🔸`/cwarn @user [category] [extra info]`\n-# Issue an informal warning (no strike count impact)\n"
+                "🔸`/cstrike @user [category] [extra info]`\n-# Add a strike to a user\n"
+                "🔸`/ctimeout @user [category] [duration] [extra info]`\n-# Timeout a user\n"
+                "🔸`/cmodhistory @user`\n-# View a user's full moderation history (strikes, warns, timeouts, kicks, bans)\n\n\n"
+                "📖 **Mod/Owner Only**\n\n"
                 "🔸`/cedit @user [field] [value]`\n-# Edit a user's profile\n"
                 "🔸`/creset @user`\n-# Reset a user's stats\n"
                 "🔸`/cendall`\n-# Force close all active sessions\n"
@@ -2125,14 +2494,14 @@ class HelpView(View):
                 "🔸`/csetleaderboardchannel #channel`\n-# Set the channel for the automatic weekly leaderboards\n"
                 "🔸`/csetdailychannel #channel`\n-# Set the channel for daily reward claim pings\n"
                 "🔸`/csetviprole @role`\n-# Set the role granted to weekly leaderboard winners\n"
-                "🔸`/cstrike @user [reason]`\n-# Add a strike to a user\n"
-                "🔸`/cunstrike @user [reason]`\n-# Remove a strike from a user\n"
-                "🔸`/cmodview @user`\n-# View a user's full profile including strikes\n"
                 "🔸`/csetstrikelogchannel #channel`\n-# Set the strike log channel\n"
                 "🔸`/csetreactionrole [message_id] [emoji] [role]`\n-# Set up a reaction role\n"
                 "🔸`/cfixprofiles`\n-# Backfill any missing fields on incomplete user profiles\n"
                 "🔸`/cpostperk [perk] #channel`\n-# Post a perk (Virginity Reset or Allure Boost) to a channel\n"
-                "🔸`/csessionoverview`\n-# Show all ongoing sessions with members, start time, and AFK check history"
+                "🔸`/csessionoverview`\n-# Show all ongoing sessions with members, start time, and AFK check history\n"
+                "🔸`/ckick @user [category] [extra info]`\n-# Kick a user from the server\n"
+                "🔸`/cban @user [category] [extra info]`\n-# Ban a user from the server\n"
+                "🔸`/cremoveaction @user`\n-# Remove a strike, warn, timeout, or ban from a user\n"
             ),
             (
                 "📖 Trigger / Test Commands (Mod/Owner only)",
