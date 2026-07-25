@@ -2,3 +2,4 @@
 __pycache__/
 *.pyc
 *firebase-adminsdk*.json
+*BOT_DOCUMENTATION.pdf
