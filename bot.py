@@ -37,6 +37,9 @@ SESSION_CHECK_INTERVAL = None  # 30 minutes in seconds
 DECAY_RATE = 0.2
 SESSION_PRICE_FLOOR = 10
 
+LEAVE_CLEANUP_THRESHOLD = 14 * 24 * 60 * 60  # 2 weeks, in seconds
+LEAVE_CLEANUP_CHECK_INTERVAL = 3600  # check once an hour
+
 pending_checks = set()  # session_ids currently waiting for a response
 
 # Active sessions {user_id: session_id}
@@ -106,6 +109,7 @@ async def on_ready():
     bot.loop.create_task(session_check_loop())
     bot.loop.create_task(leaderboard_loop())
     bot.loop.create_task(daily_eligibility_loop())
+    bot.loop.create_task(leave_cleanup_loop())
     await announce_status("✅ Currency Bot is now **online**!")
 
 @bot.event
@@ -140,6 +144,31 @@ async def on_raw_reaction_remove(payload):
     role = guild.get_role(role_data["role_id"])
     if member and role:
         await member.remove_roles(role)
+
+@bot.event
+async def on_member_remove(member: discord.Member):
+    if member.guild.id != config.ALLOWED_GUILD_ID:
+        return
+    if member.bot:
+        return
+
+    db.collection("users").document(str(member.id)).set(
+        {"left_at": time.time()}, merge=True
+    )
+    print(f"[LEAVE TRACKING] {member.name} ({member.id}) left/kicked/banned — marked for cleanup")
+    
+@bot.event
+async def on_member_join(member: discord.Member):
+    if member.guild.id != config.ALLOWED_GUILD_ID:
+        return
+    if member.bot:
+        return
+
+    ref = db.collection("users").document(str(member.id))
+    doc = ref.get()
+    if doc.exists and doc.to_dict().get("left_at") is not None:
+        ref.update({"left_at": None})
+        print(f"[LEAVE TRACKING] {member.name} ({member.id}) rejoined — cleared cleanup timestamp")
 
 @bot.event
 async def on_message(message):
@@ -780,6 +809,38 @@ async def daily_eligibility_loop():
                     view=view
                 )
                 ref.update({"daily_reminder_sent": True})
+
+async def leave_cleanup_loop():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        await asyncio.sleep(LEAVE_CLEANUP_CHECK_INTERVAL)
+        now = time.time()
+
+        from google.cloud.firestore_v1.base_query import FieldFilter
+        query = db.collection("users").where(filter=FieldFilter("left_at", ">", 0))
+
+        for doc in query.stream():
+            data = doc.to_dict()
+            left_at = data.get("left_at")
+            if not left_at:
+                continue
+
+            if now - left_at < LEAVE_CLEANUP_THRESHOLD:
+                continue
+
+            user_id = doc.id
+            print(f"[LEAVE CLEANUP] Deleting all data for user {user_id} (left {int((now - left_at) / 86400)} days ago)")
+
+            db.collection("users").document(user_id).delete()
+
+            for collection_name in ["activity", "session_activity", "coins_received"]:
+                docs = db.collection(collection_name).where(
+                    filter=FieldFilter("user_id", "==", int(user_id))
+                ).stream()
+                for d in docs:
+                    d.reference.delete()
+
+            print(f"[LEAVE CLEANUP] Finished deleting user {user_id}")
 
 class DailyClaimButton(discord.ui.DynamicItem[discord.ui.Button], template=r"daily_claim:(?P<user_id>[0-9]+)"):
     def __init__(self, user_id: int):
