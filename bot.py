@@ -70,6 +70,7 @@ async def on_ready():
     print("Registered dynamic daily claim button")
     
     reschedule_count = 0
+    user_delay_offsets = {}
     for doc in db.collection("users").stream():
         data = doc.to_dict()
         job_cooldowns = data.get("job_cooldowns", {})
@@ -89,7 +90,9 @@ async def on_ready():
             ready_at = last_claim + cooldown_seconds
 
             if ready_at > time.time():
-                bot.loop.create_task(schedule_job_ready_dm(user_id, job_name, floor_name, ready_at))
+                offset = user_delay_offsets.get(user_id, 0)
+                bot.loop.create_task(schedule_job_ready_dm(user_id, job_name, floor_name, ready_at + offset))
+                user_delay_offsets[user_id] = offset + 2
                 reschedule_count += 1
 
     print(f"Rescheduled {reschedule_count} pending job-ready DM(s)")
@@ -1059,11 +1062,13 @@ class JobButtonView(View):
         return button
 
     async def handle_job_click(self, interaction: discord.Interaction, job_name: str):
+        await interaction.response.defer(ephemeral=True)
+
         user_data = get_or_create_user(interaction.user)
         required_role_number = get_job_role_number(job_name)
 
         if user_data.get("current_job_role") != required_role_number:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ You need to be working **Job Role {required_role_number}** to do this job!",
                 ephemeral=True
             )
@@ -1080,7 +1085,7 @@ class JobButtonView(View):
             remaining = int(cooldown_seconds - (now - last_claim))
             hours = remaining // 3600
             minutes = (remaining % 3600) // 60
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 f"❌ You're still on cooldown for this job here! Try again in {hours}h {minutes}m.",
                 ephemeral=True
             )
@@ -1102,7 +1107,7 @@ class JobButtonView(View):
 
         job_label = job_name.replace("_", " ").title()
         await log_transaction(f"💼 Job: <@{interaction.user.id}> earned {reward} 🪙 working as a **{job_label}**", interaction.guild_id)
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"✅ You worked as a **{job_label}** and earned **{reward} 🪙**!",
             ephemeral=True
         )
@@ -2272,6 +2277,7 @@ async def cresetjobcooldowns(interaction: discord.Interaction, user: discord.Mem
         user_data = get_or_create_user(user)
         job_cooldowns = user_data.get("job_cooldowns", {})
 
+        delay_offset = 0
         for cooldown_key, last_claim in job_cooldowns.items():
             parts = cooldown_key.rsplit("_", 1)
             if len(parts) != 2:
@@ -2284,7 +2290,8 @@ async def cresetjobcooldowns(interaction: discord.Interaction, user: discord.Mem
             ready_at = last_claim + cooldown_seconds
 
             if ready_at > time.time():
-                bot.loop.create_task(schedule_job_ready_dm(user.id, job_name, floor_name, time.time()))
+                bot.loop.create_task(schedule_job_ready_dm(user.id, job_name, floor_name, time.time() + delay_offset))
+                delay_offset += 2
 
         db.collection("users").document(str(user.id)).update({"job_cooldowns": {}})
         await interaction.response.send_message(f"✅ Cleared all job cooldowns for {user.mention}. They can work any job immediately.", ephemeral=True)
