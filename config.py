@@ -35,14 +35,14 @@ RECEIVED_LEADERBOARD_REWARDS = [400, 250, 125]
 
 # Each job: (min_pay, max_pay, cooldown_seconds)
 JOB_PAY_INFO = {
-    "bartender":     (40, 80, 8 * 60 * 60),
-    "librarian":     (40, 80, 8 * 60 * 60),
-    "gardener":      (40, 80, 8 * 60 * 60),
-    "floor_cleaner": (25, 50, 6 * 60 * 60),
-    "housekeeping":  (25, 50, 6 * 60 * 60),
-    "maintenance":   (60, 110, 10 * 60 * 60),
-    "technician":    (60, 110, 10 * 60 * 60),
-    "sex_worker":    (25, 50, 8 * 60 * 60),
+    "bartender":     (18, 36, 8 * 60 * 60),
+    "librarian":     (18, 36, 8 * 60 * 60),
+    "gardener":      (18, 36, 8 * 60 * 60),
+    "floor_cleaner": (12, 24, 8 * 60 * 60),
+    "housekeeping":  (12, 24, 8 * 60 * 60),
+    "maintenance":   (55, 109, 24 * 60 * 60),
+    "technician":    (55, 109, 24 * 60 * 60),
+    "sex_worker":    (14, 28, 6 * 60 * 60),
 }
 
 # Which jobs belong to each Job Role (1-4), and what button color represents that role
